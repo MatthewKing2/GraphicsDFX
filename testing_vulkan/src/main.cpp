@@ -50,6 +50,7 @@ private:
     std::vector<VkImage> swapChainImages;       // Vector of images in the Swap Chain
     VkFormat swapChainImageFormat;              // Image Format 
     VkExtent2D swapChainExtent;                 // Chain Extent 
+    std::vector<VkImageView> swapChainImageViews;   // Vector to store the VIEWs into Images in the Swap Chain 
 
 public:
     void run() {
@@ -68,6 +69,41 @@ private:
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);    // Args = Width, Height, Title, Monitor*, OpenGL*. 
     }
+
+
+    // Create Image View. (now that we have swap chain with iamges, need a way to "view" these images and interface with them)
+    // ----------------------------------------------------------------------------------------------------------------------------------
+    void createImageViews() {
+        swapChainImageViews.resize(swapChainImages.size()); // Size the Views based on the size of vector of images in the swap chain 
+        // Iterate over all of the swap chain images: 
+        for (size_t i = 0; i < swapChainImages.size(); i++) {
+            // Misc
+            VkImageViewCreateInfo createInfo{};                             // Create view info wrt this Image in the swap chain
+            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;    // Type = VIEW Info 
+            createInfo.image = swapChainImages[i];                          // The image is one at index "i" in the swap chain vector
+            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;                    // Treat images as 1D, 2D, or 3D textures 
+            createInfo.format = swapChainImageFormat;                       // idk
+            // Components
+            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;    // default mapping 
+            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;    // default mapping 
+            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;    // default mapping 
+            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;    // default mapping 
+            // SubresourceRange
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; // Our images are used as "color targets" 
+            createInfo.subresourceRange.baseMipLevel = 0;
+            createInfo.subresourceRange.levelCount = 1;
+            createInfo.subresourceRange.baseArrayLayer = 0;
+            createInfo.subresourceRange.layerCount = 1;
+            // Create the Image View (for this image in the swap chain) 
+            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create image views!");
+            }
+            std::cout << "Created Image view for Image #" << i << " in Swap Chain" << std::endl;
+        }
+        std::cout << "Done creating image views!" << std::endl;
+    }
+    // ----------------------------------------------------------------------------------------------------------------------------------
+
 
     // Swap Chain: Create (based on Surface Format, Present Mode, and Swap Extent) 
     // ----------------------------------------------------------------------------------------------------------------------------------
@@ -403,6 +439,7 @@ private:
         pickPhysicalDevice();       // Pick a Physical Device, and determine its feature set / Qs
         createLogicalDevice();      // Create Logical Device to interface Physical Device
         createSwapChain();          // Create Swap Chain (images to be written to the screen)
+        createImageViews();         // Create the Views into the images in the above Swap Chain
     }
 
 
@@ -484,6 +521,7 @@ private:
     }
 
     void cleanup() {
+        for (auto imageView : swapChainImageViews) { vkDestroyImageView(device, imageView, nullptr); }  // For each image view (wrt to the swap chain) we need to destory it (becase we manually created it)
         vkDestroySwapchainKHR(device, swapChain, nullptr);  // Destroy the swap chain
         vkDestroyDevice(device, nullptr);       // Destorys the logical device 
         vkDestroySurfaceKHR(instance, surface, nullptr);    // Destore the surface 
