@@ -30,6 +30,8 @@ private:
         std::optional<uint32_t> graphicsFamily;
         bool isComplete() { return graphicsFamily.has_value(); }
     };
+    VkDevice device;                // Logical Device 
+    VkQueue graphicsQueue;          // Handler to the Graphics Q (so we can interface it)
 
 public:
     void run() {
@@ -48,6 +50,45 @@ private:
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);    // Args = Width, Height, Title, Monitor*, OpenGL*. 
     }
+
+
+
+    // Creat the Logical Device so that you can interface the Physical Device (Now that we have a Physical Device, and know what Q families we have)
+    // ----------------------------------------------------------------------------------------------------------------------------------
+        void createLogicalDevice() {
+            // Specifying the queues to be created
+                QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+                VkDeviceQueueCreateInfo queueCreateInfo{};
+                queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+                queueCreateInfo.queueFamilyIndex = indices.graphicsFamily.value();
+                queueCreateInfo.queueCount = 1;
+            // Specify Qs priority (determines which Q scheduler sends to GPU first)
+                float queuePriority = 1.0f;
+                queueCreateInfo.pQueuePriorities = &queuePriority;
+            // Define the features this logical device has (based on physical device)
+                VkPhysicalDeviceFeatures deviceFeatures{};  // No definition ==> all memeber == FALSE (ie DNE)
+            // Create the Logical Device 
+                VkDeviceCreateInfo createInfo{};
+                createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+            // Add pointers to the queue creation info and device features structs 
+                createInfo.pQueueCreateInfos = &queueCreateInfo;
+                createInfo.queueCreateInfoCount = 1;
+                createInfo.pEnabledFeatures = &deviceFeatures;
+            // Some non sense to be compatible with older versoins of vulkan 
+                createInfo.enabledExtensionCount = 0;
+                if (enableValidationLayers) {
+                    createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+                    createInfo.ppEnabledLayerNames = validationLayers.data();
+                } else { createInfo.enabledLayerCount = 0; }
+            // Instantiate the Logical Device (vkCREATEdevice)
+                if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) { throw std::runtime_error("failed to create logical device!"); }
+                    // Specifying to the instance information about: // Qs // PHysical Device // Suprted features
+            // Retrieving queue handles 
+                vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
+            std::cout << "Logical Device Created!" << std::endl;
+        }
+    // ----------------------------------------------------------------------------------------------------------------------------------
+
 
     // Based on the GPU Physical Device, see what Q families (types) it has 
     // ----------------------------------------------------------------------------------------------------------------------------------
@@ -132,9 +173,10 @@ private:
 
 
     void initVulkan() {
-        createInstance();
-        // setupDebugMessenger(); // I skipped this part of tutorial
-        pickPhysicalDevice();
+        createInstance();           // Create Vulkan Instance
+        // setupDebugMessenger();   // I skipped this part of tutorial
+        pickPhysicalDevice();       // Pick a Physical Device, and determine its feature set / Qs
+        createLogicalDevice();      // Create Logical Device to interface Physical Device
     }
 
 
@@ -216,6 +258,7 @@ private:
     }
 
     void cleanup() {
+        vkDestroyDevice(device, nullptr);       // Destorys the logical device 
         vkDestroyInstance(instance, nullptr);   // Desotry the vulkan instance
         glfwDestroyWindow(window);              // destory the window
         glfwTerminate();                        // turn off glfw 
