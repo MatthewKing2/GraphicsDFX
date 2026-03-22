@@ -1,11 +1,23 @@
 // #include <vulkan/vulkan.h>  //Include the Vulkan header which provides the functions, structures and enumerations.  
 #define GLFW_INCLUDE_VULKAN     // Replace vulkan header with the GLFW one (this automaticlaly loads the vulkan one)
 #include <GLFW/glfw3.h>
-
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 #include <vector>
+#include <optional>
+
+
+// Validation Layers (enblaed or disabled at compile time, based on NDEBUG flag)
+// #######################################################################################
+const std::vector<const char*> validationLayers = { "VK_LAYER_KHRONOS_validation" };
+#ifdef NDEBUG
+    const bool enableValidationLayers = false;
+#else
+    const bool enableValidationLayers = true;
+#endif
+
+
 
 class HelloTriangleApplication {
 private:
@@ -13,6 +25,11 @@ private:
     const uint32_t WIDTH = 800;     // Window Width
     const uint32_t HEIGHT = 600;    // Window Height
     VkInstance instance;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;   // This is the GPU Physical Device we are using (struct of info about it)
+    struct QueueFamilyIndices {     // Struct that holds the different types of Qs
+        std::optional<uint32_t> graphicsFamily;
+        bool isComplete() { return graphicsFamily.has_value(); }
+    };
 
 public:
     void run() {
@@ -32,11 +49,107 @@ private:
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);    // Args = Width, Height, Title, Monitor*, OpenGL*. 
     }
 
-    void initVulkan() {
-        createInstance();
+    // Based on the GPU Physical Device, see what Q families (types) it has 
+    // ----------------------------------------------------------------------------------------------------------------------------------
+    QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
+        QueueFamilyIndices indices;
+        // Count the  number of Q Families there are for this GPU (physical device)
+            uint32_t queueFamilyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+        // Based on that number, make a vector of that size, to hold all the different Qs
+            std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+            vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+        // Look for a Q that supports "VK_QUEUE_GRAPHICS_BIT" ()
+            int i = 0;
+            for (const auto& queueFamily : queueFamilies) {
+                if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) { indices.graphicsFamily = i; }
+                i++;
+            }
+        return indices;
+    }
+    // ----------------------------------------------------------------------------------------------------------------------------------
+
+
+    // Pick a GPU to be used: 
+    // ----------------------------------------------------------------------------------------------------------------------------------
+    // Actually picks the GPU
+    void pickPhysicalDevice() {
+        uint32_t deviceCount = 0;
+        vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+        if (deviceCount == 0) { throw std::runtime_error("failed to find GPUs with Vulkan support!"); }
+        else{ std::cout << "There exsits GPUs with Vulkan Support on this device!" << std::endl; }
+        // allocate an array to hold all of the VkPhysicalDevice handles.
+        std::vector<VkPhysicalDevice> devices(deviceCount);                     // create vector of size "device Count"
+        vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());     // Enumerate, putting data for each GPU into above Vector 
+        // Iterates through the devices, and runs them through the "is sutable" function
+        for (const auto& device : devices) {
+            if (isDeviceSuitable(device)) { physicalDevice = device; break; }
+        }
+        if (physicalDevice == VK_NULL_HANDLE) { throw std::runtime_error("failed to find a suitable GPU!"); }
+        else{ std::cout << "Found a stuable GPU to go with :)" << std::endl; }
+    }
+    // Looks at the GPU devices, and returns true if its sutable for what we want 
+    bool isDeviceSuitable(VkPhysicalDevice device) {
+        // Look at the Q types this GPU supports, and return true, if this GPU has "graphics Family" which I defined as "having a value" if the device as the "VK_QUEUE_GPU_BIT" or some such
+            QueueFamilyIndices indices = findQueueFamilies(device);
+            // return indices.graphicsFamily.has_value();
+            return indices.isComplete(); // same as above just more abstraction :) 
+        // In the future could do something more advanced: 
+            // ---------------------------------------------------------------
+            // VkPhysicalDeviceProperties deviceProperties;
+            // VkPhysicalDeviceFeatures deviceFeatures;
+            // vkGetPhysicalDeviceProperties(device, &deviceProperties);   // Gets GPU Properties
+            // vkGetPhysicalDeviceFeatures(device, &deviceFeatures);       // Gets GPU Features
+            // return deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU && deviceFeatures.geometryShader;
+            //     // Want physical GPU with Geomtry shader support
+            // ---------------------------------------------------------------
+    }
+    // ----------------------------------------------------------------------------------------------------------------------------------
+
+
+
+    bool checkValidationLayerSupport() {
+        // Get a <vector> of all of the validation layers that are supported 
+        // -------------------------------------------------------------------------------
+        uint32_t layerCount;
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+        std::vector<VkLayerProperties> availableLayers(layerCount);
+        vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+
+        // Make sure all of the validation layers we want are included in the avialbe layers
+        // -------------------------------------------------------------------------------
+        for (const char* layerName : validationLayers) {
+            bool layerFound = false;
+            for (const auto& layerProperties : availableLayers) {
+                if (strcmp(layerName, layerProperties.layerName) == 0) { layerFound = true; break; }
+            }
+            if (!layerFound) { return false; }
+        }
+
+        // If made it this far, we good: 
+        return true;
     }
 
+
+    void initVulkan() {
+        createInstance();
+        // setupDebugMessenger(); // I skipped this part of tutorial
+        pickPhysicalDevice();
+    }
+
+
     void createInstance() {
+        // Make sure all requested validation layers (debug shit) are accounted for 
+        // -------------------------------------------------------------------------------
+        VkInstanceCreateInfo createInfo{};
+        if (enableValidationLayers){
+            createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+            createInfo.ppEnabledLayerNames = validationLayers.data();
+            if(!checkValidationLayerSupport()) { throw std::runtime_error("validation layers requested, but not available!"); }
+            else{std::cout << "Validation turned on!" << std::endl;}
+        }
+        else{createInfo.enabledLayerCount = 0;}
+
         // Optonally give extra info to the graphics driver (struct)
         // -------------------------------------------------------------------------------
         // This data is technically optional, but it may provide some useful 
@@ -57,7 +170,6 @@ private:
         // extensions and validation layers we want to use. Global here means that 
         // they apply to the entire program and not a specific device, which will 
         // become clear in the next few chapters.
-        VkInstanceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         createInfo.pApplicationInfo = &appInfo;
         // The next two layers specify the desired global extensions. As mentioned in 
