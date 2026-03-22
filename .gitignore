@@ -1,0 +1,13 @@
+*
+
+!.gitignore
+!glm/
+!glm/**
+!Libraries/
+!Libraries/**
+!testing_vulkan/
+!testing_vulkan/shaders/
+!testing_vulkan/shaders/**
+!testing_vulkan/src/
+!testing_vulkan/src/**
+!testing_vulkan/Makefile
