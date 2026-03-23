@@ -216,7 +216,7 @@ private:
         // -------------------------------------------------------
         // Done recording the command buffer 
             if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) { throw std::runtime_error("failed to record command buffer!"); }
-            std::cout << "Recorded Command Buffer!" << std::endl;
+            // std::cout << "Recorded Command Buffer!" << std::endl;
     }
     // ----------------------------------------------------------------------------------------------------------------------------------
 
@@ -959,6 +959,7 @@ private:
             glfwPollEvents();                       // polls for events, like clicking the X button
             drawFrame();                            // Drag the Frame! :fire: 
         }
+        vkDeviceWaitIdle(device); // Since we do Asynch operations in drawframe() need to wait to be done before exiting main loop and going to cleanup
     }
     // -----------------------------------------------------------------------------------
 
