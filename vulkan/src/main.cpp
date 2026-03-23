@@ -54,6 +54,7 @@ private:
     std::vector<VkImageView> swapChainImageViews;   // Vector to store the VIEWs into Images in the Swap Chain 
     VkPipelineLayout pipelineLayout;            // Struct defining the pipeline layout 
     VkRenderPass renderPass;                    // Struct defining the render pass
+    VkPipeline graphicsPipeline;                // The Graphics Peipline (top dawg)
 
 public:
     void run() {
@@ -217,6 +218,32 @@ private:
             pipelineLayoutInfo.pushConstantRangeCount = 0; // Optional
             pipelineLayoutInfo.pPushConstantRanges = nullptr; // Optional
             if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) { throw std::runtime_error("failed to create pipeline layout!"); }
+        
+        // Create the ACTUAL Graphics Peipeline OBJECT 
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.stageCount = 2;
+            // Shader (Programable) Stages: 
+            pipelineInfo.pStages = shaderStages;
+            // Fixed Function Stages: 
+            pipelineInfo.pVertexInputState = &vertexInputInfo;
+            pipelineInfo.pInputAssemblyState = &inputAssembly;
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &rasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pDepthStencilState = nullptr; // Optional
+            pipelineInfo.pColorBlendState = &colorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            // Handler 
+            pipelineInfo.layout = pipelineLayout;
+            // Refernce the Render Pass 
+            pipelineInfo.renderPass = renderPass;
+            pipelineInfo.subpass = 0;
+            // Basically if you wanted you could create the peipline object based on another piepline ojbect, but we are not doing that here  
+            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
+            pipelineInfo.basePipelineIndex = -1; // Optional
+            // Create the guy 
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) { throw std::runtime_error("failed to create graphics pipeline!"); }
         // Able to destorey the Shader Wrapper now (some non sense about when the complication happesn idk)
             vkDestroyShaderModule(device, fragShaderModule, nullptr);
             vkDestroyShaderModule(device, vertShaderModule, nullptr); 
@@ -714,6 +741,7 @@ private:
     }
 
     void cleanup() {
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);       // Destroy the piepline 
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);   // Destory the peipleine layout 
         vkDestroyRenderPass(device, renderPass, nullptr);           // Desotry the render pass
         for (auto imageView : swapChainImageViews) { vkDestroyImageView(device, imageView, nullptr); }  // For each image view (wrt to the swap chain) we need to destory it (becase we manually created it)
