@@ -58,6 +58,10 @@ private:
     std::vector<VkFramebuffer> swapChainFramebuffers;   // Hold the frame buffers 
     VkCommandPool commandPool;                  // Command Pools (manage Command Buffers)
     VkCommandBuffer commandBuffer;              // Command Buffers 
+    // Schronization 
+    VkSemaphore imageAvailableSemaphore;        // We'll need one semaphore to signal that an image has been acquired from the swapchain and is ready for rendering
+    VkSemaphore renderFinishedSemaphore;        // another one to signal that rendering has finished and presentation can happen
+    VkFence inFlightFence;                      // and a fence to make sure only one frame is rendering at a time.
 
 public:
     void run() {
@@ -76,6 +80,88 @@ private:
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);    // Args = Width, Height, Title, Monitor*, OpenGL*. 
     }
+
+
+    // Draw the frame to the window 
+        // At a high level, rendering a frame in Vulkan consists of a common set of steps:
+            // 1) Wait for the previous frame to finish
+            // 2) Acquire an image from the swap chain
+            // 3) Record a command buffer which draws the scene onto that image
+            // 4) Submit the recorded command buffer
+            // 5) Present the swap chain image
+            // While we will expand the drawing function in later chapters, for now this is the core of our render loop.
+        // Shchronization 
+            // A core design philosophy in Vulkan is that synchronization of execution on the GPU is explicit. 
+            // In this chapter there are a number of events that we need to order explicitly because they happen on the GPU, such as:
+                // - Acquire an image from the swap chain
+                // - Execute commands that draw onto the acquired image
+                // - Present that image to the screen for presentation, returning it to the swapchain
+            // Each of these events is set in motion using a single function call, but are all executed asynchronously. The function calls will return before the operations are actually finished.
+            // In summary, semaphores are used to specify the execution order of operations on the GPU while fences are used to keep the CPU and GPU in sync with each-other.
+    // ----------------------------------------------------------------------------------------------------------------------------------
+    void drawFrame(){
+        // At the start of the frame, we want to wait until the previous frame has finished, so that the command buffer and semaphores are available to use. To do that, we call vkWaitForFences:
+            vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+        // Manually Reset the fench after done waiting on it 
+            vkResetFences(device, 1, &inFlightFence);
+        // Aquire an Image from the Swap Chain (based on logical device and swap chain, and semphaore image vaiable)
+            uint32_t imageIndex;    // want the index of the image so we know who we got 
+            vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        // With the imageIndex specifying the swap chain image to use in hand, we can now record the command buffer.
+            vkResetCommandBuffer(commandBuffer, 0);             // Reset the command buffer 
+            recordCommandBuffer(commandBuffer, imageIndex);     // Record command buffer for this image index 
+        // Submitting the Command Buffer 
+            // Configureation Info: 
+                VkSubmitInfo submitInfo{};
+                submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                VkSemaphore waitSemaphores[] = {imageAvailableSemaphore};       // Wait on this sempahore 
+                VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+                submitInfo.waitSemaphoreCount = 1;
+                submitInfo.pWaitSemaphores = waitSemaphores;
+                submitInfo.pWaitDstStageMask = waitStages;
+                submitInfo.commandBufferCount = 1;
+                submitInfo.pCommandBuffers = &commandBuffer;
+                VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};     // Singal this sempahore when done 
+                submitInfo.signalSemaphoreCount = 1;
+                submitInfo.pSignalSemaphores = signalSemaphores;
+            // Submit it 
+            if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) { throw std::runtime_error("failed to submit draw command buffer!"); }
+        // Presentation: 
+            VkPresentInfoKHR presentInfo{};
+            presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+            presentInfo.waitSemaphoreCount = 1;
+            presentInfo.pWaitSemaphores = signalSemaphores; // wait for singals semphahore before presenting to screen (b/c when singal seamphore is done that means the GPUs computation for our triangle is done, therefore its ready to be writen to the screen)
+            // Swap Chain stuff: 
+            VkSwapchainKHR swapChains[] = {swapChain};
+            presentInfo.swapchainCount = 1;
+            presentInfo.pSwapchains = swapChains;
+            presentInfo.pImageIndices = &imageIndex;
+            presentInfo.pResults = nullptr; // Optional
+            // Actually Presneit it! YOu should now have triangel!!!!!!!!!!!!!!!!!! 
+            vkQueuePresentKHR(presentQueue, &presentInfo);
+    }
+    // ----------------------------------------------------------------------------------------------------------------------------------
+
+    
+    // Need shcrnization between CPU and GPU 
+    // ----------------------------------------------------------------------------------------------------------------------------------
+    void createSyncObjects(){
+        // Semphore information: 
+            VkSemaphoreCreateInfo semaphoreInfo{};
+            semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        // Fench information: 
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // start in singals state b/c otherwise on cold start, wait forever for singal that never comes 
+        // Create 2 semphaore, and 1 fenche: 
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
+            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create semaphores!");
+        }
+    }
+    // ----------------------------------------------------------------------------------------------------------------------------------
+
 
     // Write commands (called record for some reason) to the COmmand Buffer   
     // We'll now start working on the recordCommandBuffer function that writes the commands we want to execute into a command buffer. The VkCommandBuffer used will be passed in as a parameter, as well as the index of the current swapchain image we want to write to.
@@ -218,6 +304,14 @@ private:
             subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
             subpass.colorAttachmentCount = 1;
             subpass.pColorAttachments = &colorAttachmentRef;
+        // Subpass Depency something or other b/c of the seamphore schrinization that we needed to do  
+            VkSubpassDependency dependency{};
+            dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+            dependency.dstSubpass = 0;
+            dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dependency.srcAccessMask = 0;
+            dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         // Render Pass: 
             VkRenderPassCreateInfo renderPassInfo{};
             renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -225,6 +319,9 @@ private:
             renderPassInfo.pAttachments = &colorAttachment;
             renderPassInfo.subpassCount = 1;
             renderPassInfo.pSubpasses = &subpass;
+            // Depcny stuff 
+            renderPassInfo.dependencyCount = 1;
+            renderPassInfo.pDependencies = &dependency;
         // Create the render pass object 
             if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) { throw std::runtime_error("failed to create render pass!"); }
         // Print Debug 
@@ -782,6 +879,7 @@ private:
         createFramebuffers();       // Create the frame buffers 
         createCommandPool();        // Create the Command Pool (this manges the Command Buffers Memeory and such)
         createCommandBuffer();      // Create the COmmand Buffers
+        createSyncObjects();        // Sychrnization between CPU and GPU (and between GPU Qs)
     }
 
 
@@ -854,15 +952,21 @@ private:
     }
 
 
+    // "Forever" Loop: 
+    // -----------------------------------------------------------------------------------
     void mainLoop() {
-        // Forever Loop: 
-        // -----------------------------------------------------------------------------------
         while (!glfwWindowShouldClose(window)) {    // while you should not close the window: 
             glfwPollEvents();                       // polls for events, like clicking the X button
+            drawFrame();                            // Drag the Frame! :fire: 
         }
     }
+    // -----------------------------------------------------------------------------------
+
 
     void cleanup() {
+        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);   // Semaphore 1
+        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);   // Semaphore 2
+        vkDestroyFence(device, inFlightFence, nullptr);                 // Fence 1
         vkDestroyCommandPool(device, commandPool, nullptr);         // Destory the Command Pool
         for (auto framebuffer : swapChainFramebuffers) { vkDestroyFramebuffer(device, framebuffer, nullptr); }  // destory each frame buffer (vector of buffers that map 1:1 with image views who map 1:1 with iamges)
         vkDestroyPipeline(device, graphicsPipeline, nullptr);       // Destroy the piepline 
