@@ -8,6 +8,7 @@ INCLUDES = \
 -I"../glm" \
 -I"../Libraries/glfw-3.4.bin.WIN64/include" \
 -I"../Libraries/stb" \
+-I"../Libraries/tinyobjloader" \
 -I"/c/VulkanSDK/1.4.341.1/Include"
 
 LIBS = \
