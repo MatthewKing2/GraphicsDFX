@@ -11,3 +11,9 @@
 !testing_vulkan/src/
 !testing_vulkan/src/**
 !testing_vulkan/Makefile
+
+!graphics/
+!graphics/vulkan/
+!graphics/vulkan/src/
+!graphics/vulkan/src/renderer.cpp
+!graphics/vulkan/src/renderer.hpp
