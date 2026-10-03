@@ -228,7 +228,8 @@ int main() {
 
         // While 1 forever loop body
         // ########################################################################
-        auto previousTime = std::chrono::steady_clock::now();
+        auto startTime = std::chrono::steady_clock::now();
+        auto previousTime = startTime;
         while (!renderer.shouldClose()) {
             // No clue tbh
             renderer.pollEvents();
@@ -236,6 +237,7 @@ int main() {
             // Update lock
             const auto now = std::chrono::steady_clock::now();
             const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
+            const float totalSeconds = std::chrono::duration<float>(now - startTime).count();
             previousTime = now;
 
             // Get camera inputs 
@@ -244,7 +246,7 @@ int main() {
             // Draw frame 
             renderer.drawFrame(
                 makeTransforms(
-                    deltaSeconds, 
+                    totalSeconds, 
                     renderer.aspectRatio(),
                     camera.state()
                 )
