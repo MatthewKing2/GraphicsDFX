@@ -51,29 +51,29 @@ Mesh makeQuad() {
     Mesh matthew_quad;  // confused about the memory managment here, is this on the stack or the heap. id guess stack but then idk how we are returning it? i guess that we can return it by just pushing the values onto the stack? can return more than just an interger value? should know this tbh
 
     Vertex matthew_v1{};
-    matthew_v1.position = {-0.5f, -0.5f, 0.5f};         // glm::vec3 is 3-component fp32 vector, position = x,y,z
-    matthew_v1.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v1.position = {-0.5f, -0.5f, 0.0f};         // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v1.color = {1.0f, 0.0f, 0.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v1.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v1);
     matthew_quad.indices.push_back(0);
 
     Vertex matthew_v2{};
-    matthew_v2.position = {-0.5f, 0.5f, 0.5f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
-    matthew_v2.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v2.position = {-0.5f, 0.5f, 0.0f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v2.color = {0.0f, 1.0f, 0.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v2.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v2);
     matthew_quad.indices.push_back(1);
 
     Vertex matthew_v3{};
-    matthew_v3.position = {0.5f, -0.5f, 0.5f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
-    matthew_v3.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v3.position = {0.5f, -0.5f, 0.0f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v3.color = {0.0f, 0.0f, 1.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v3.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v3);
     matthew_quad.indices.push_back(2);
 
     Vertex matthew_v4{};
-    matthew_v4.position = {0.5f, 0.5f, 0.5f};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
-    matthew_v4.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v4.position = {0.5f, 0.5f, 0.0f};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v4.color = {1.0f, 0.0f, 1.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v4.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v4);
     matthew_quad.indices.push_back(2);                  //  
@@ -84,6 +84,27 @@ Mesh makeQuad() {
     // Each group of three describes one triangle:
         // - First triangle: vertices[0], vertices[1], vertices[2].
         // - Second triangle: vertices[2], vertices[1], vertices[3].
+
+    // Fill in the back of the square so can see front and back
+    matthew_quad.indices.push_back(3);
+    matthew_quad.indices.push_back(1);
+    matthew_quad.indices.push_back(2);
+
+    matthew_quad.indices.push_back(2);
+    matthew_quad.indices.push_back(1);
+    matthew_quad.indices.push_back(0);
+
+
+
+    // local vertex
+    //     → model matrix       places it in the world
+    //     → view matrix        expresses it relative to the camera
+    //     → projection matrix  applies perspective
+    //     → screen
+    // projection * view * model * position
+
+
+
 
     return matthew_quad;
 }
@@ -145,20 +166,38 @@ Mesh loadObj(const std::string& path) {
 }
 
 SceneTransforms makeTransforms(float timeSeconds, float aspectRatio) {
+
+    // Your mesh stores vertex positions. The model, view, and projection matrices transform those positions to determine where the mesh appears on screen.
+    // - Model: Places the mesh in the world. Your square might be defined around (0, 0, 0); this matrix can move it somewhere else, rotate it, or resize it.
+    // - View: Expresses the world relative to the camera. It accounts for where the camera is and which way it faces.
+    // - Projection: Determines how that camera’s view becomes a flat image. A perspective projection makes distant objects appear smaller; an orthographic projection keeps their size independent of distance.
+
+    // struct SceneTransforms {
+    //     alignas(16) glm::mat4 model;         // 4x4 matrix of fp32, alignas(16) tells compiler to put this memory at 16byte alignment 
+    //     alignas(16) glm::mat4 view;          // 4x4 matrix of fp32
+    //     alignas(16) glm::mat4 projection;    // 4x4 matrix of fp32
+    // };
+
     SceneTransforms transforms{};
 
+
+
     transforms.model = glm::rotate(
-        glm::mat4(1.0f),
-        timeSeconds * glm::radians(90.0f),
-        glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::mat4(1.0f),                        // identiy matrix 
+        timeSeconds * glm::radians(90.0f),      // rotating 90 radians per second 
+        glm::vec3(0.0f, 1.0f, 0.0f));           // around the y axis (x,y,z)
 
     transforms.view = glm::lookAt(
-        glm::vec3(2.0f, 2.0f, 2.0f),
-        glm::vec3(0.0f, 0.0f, 0.0f),
-        glm::vec3(0.0f, 0.0f, 1.0f));
+        glm::vec3(4.0f, 4.0f, 0.0f),            // where camera is in the world (x, y, z)
+        glm::vec3(0.0f, 0.0f, 0.0f),            // point the camera looks towards 
+        glm::vec3(0.0f, 0.0f, 1.0f));           // reference "up" direction, positive z (x,y,z)
 
-    transforms.projection =
-        glm::perspective(glm::radians(45.0f), aspectRatio, 0.1f, 10.0f);
+    transforms.projection = glm::perspective(
+        glm::radians(45.0f),                    // how wide an angle the camera sees veritically 
+        aspectRatio,                            // viewpoint (camera fov) width / height (ratio)
+        0.1f,                                   // the near clipping plane (no clue what that mean)
+        10.0f                                   // the far clipping plane (no clue what that mean)
+    );
 
     // GLM uses an OpenGL-style Y axis; Vulkan's clip-space Y axis is inverted.
     transforms.projection[1][1] *= -1.0f;
