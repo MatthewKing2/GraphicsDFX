@@ -71,12 +71,19 @@ Mesh makeQuad() {
     matthew_quad.vertices.push_back(matthew_v3);
     matthew_quad.indices.push_back(2);
 
-    // Vertex matthew_v4{};
-    // matthew_v4.position = {0.5f, 0.5f, 0.5f};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
-    // matthew_v4.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
-    // matthew_v4.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
-    // matthew_quad.vertices.push_back(matthew_v4);
-    // matthew_quad.indices.push_back(3);
+    Vertex matthew_v4{};
+    matthew_v4.position = {0.5f, 0.5f, 0.5f};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v4.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v4.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
+    matthew_quad.vertices.push_back(matthew_v4);
+    matthew_quad.indices.push_back(2);                  //  
+    matthew_quad.indices.push_back(1);
+    matthew_quad.indices.push_back(3);
+    // indices tells the GPU which vertices to connect, using their positions in the vertices vector.
+    // For example, when drawing triangles: indices = {0, 1, 2,  2, 1, 3};
+    // Each group of three describes one triangle:
+        // - First triangle: vertices[0], vertices[1], vertices[2].
+        // - Second triangle: vertices[2], vertices[1], vertices[3].
 
     return matthew_quad;
 }
