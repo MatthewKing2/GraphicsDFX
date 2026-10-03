@@ -39,6 +39,49 @@ struct VertexHash {
     }
 };
 
+
+// -1   -0.5    0   0.5     1 
+// -0.5   *          *
+// 0
+// 0.5    *          *
+// 1
+
+
+Mesh makeQuad() {
+    Mesh matthew_quad;  // confused about the memory managment here, is this on the stack or the heap. id guess stack but then idk how we are returning it? i guess that we can return it by just pushing the values onto the stack? can return more than just an interger value? should know this tbh
+
+    Vertex matthew_v1{};
+    matthew_v1.position = {-0.5f, -0.5f, 0.5f};         // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v1.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v1.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
+    matthew_quad.vertices.push_back(matthew_v1);
+    matthew_quad.indices.push_back(0);
+
+    Vertex matthew_v2{};
+    matthew_v2.position = {-0.5f, 0.5f, 0.5f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v2.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v2.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
+    matthew_quad.vertices.push_back(matthew_v2);
+    matthew_quad.indices.push_back(1);
+
+    Vertex matthew_v3{};
+    matthew_v3.position = {0.5f, -0.5f, 0.5f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v3.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    matthew_v3.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
+    matthew_quad.vertices.push_back(matthew_v3);
+    matthew_quad.indices.push_back(2);
+
+    // Vertex matthew_v4{};
+    // matthew_v4.position = {0.5f, 0.5f, 0.5f};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    // matthew_v4.color = {168.0f, 50.0f, 147.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
+    // matthew_v4.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
+    // matthew_quad.vertices.push_back(matthew_v4);
+    // matthew_quad.indices.push_back(3);
+
+    return matthew_quad;
+}
+
+
 Mesh loadObj(const std::string& path) {
     tinyobj::attrib_t attributes;
     std::vector<tinyobj::shape_t> shapes;
@@ -100,7 +143,7 @@ SceneTransforms makeTransforms(float timeSeconds, float aspectRatio) {
     transforms.model = glm::rotate(
         glm::mat4(1.0f),
         timeSeconds * glm::radians(90.0f),
-        glm::vec3(0.0f, 0.0f, 1.0f));
+        glm::vec3(0.0f, 1.0f, 0.0f));
 
     transforms.view = glm::lookAt(
         glm::vec3(2.0f, 2.0f, 2.0f),
@@ -119,7 +162,9 @@ SceneTransforms makeTransforms(float timeSeconds, float aspectRatio) {
 
 int main() {
     try {
-        Mesh mesh = loadObj(MODEL_PATH);
+        // Mesh mesh = loadObj(MODEL_PATH);
+        Mesh mesh = makeQuad();
+
         Renderer renderer(
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
