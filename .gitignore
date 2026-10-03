@@ -17,3 +17,5 @@
 !graphics/vulkan/src/
 !graphics/vulkan/src/renderer.cpp
 !graphics/vulkan/src/renderer.hpp
+!graphics/vulkan/src/camera.cpp
+!graphics/vulkan/src/camera.hpp

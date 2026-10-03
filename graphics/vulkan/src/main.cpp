@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "camera.hpp"
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
@@ -165,7 +166,7 @@ Mesh loadObj(const std::string& path) {
     return mesh;
 }
 
-SceneTransforms makeTransforms(float timeSeconds, float aspectRatio) {
+SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const CameraState& camera) {
 
     // Your mesh stores vertex positions. The model, view, and projection matrices transform those positions to determine where the mesh appears on screen.
     // - Model: Places the mesh in the world. Your square might be defined around (0, 0, 0); this matrix can move it somewhere else, rotate it, or resize it.
@@ -180,23 +181,23 @@ SceneTransforms makeTransforms(float timeSeconds, float aspectRatio) {
 
     SceneTransforms transforms{};
 
-
-
     transforms.model = glm::rotate(
         glm::mat4(1.0f),                        // identiy matrix 
         timeSeconds * glm::radians(90.0f),      // rotating 90 radians per second 
-        glm::vec3(0.0f, 1.0f, 0.0f));           // around the y axis (x,y,z)
+        glm::vec3(0.0f, 1.0f, 0.0f)             // around the y axis (x,y,z)
+    );
 
     transforms.view = glm::lookAt(
-        glm::vec3(4.0f, 4.0f, 0.0f),            // where camera is in the world (x, y, z)
-        glm::vec3(0.0f, 0.0f, 0.0f),            // point the camera looks towards 
-        glm::vec3(0.0f, 0.0f, 1.0f));           // reference "up" direction, positive z (x,y,z)
+        camera.position,                    // where camera is in the world (x, y, z)
+        camera.position + camera.forward,   // point the camera looks towards 
+        camera.up                           // reference "up" direction, positive z (x,y,z)
+    );
 
     transforms.projection = glm::perspective(
-        glm::radians(45.0f),                    // how wide an angle the camera sees veritically 
-        aspectRatio,                            // viewpoint (camera fov) width / height (ratio)
-        0.1f,                                   // the near clipping plane (no clue what that mean)
-        10.0f                                   // the far clipping plane (no clue what that mean)
+        glm::radians(camera.verticalFieldOfViewDegrees),    // how wide an angle the camera sees veritically 
+        aspectRatio,                                        // viewpoint (camera fov) width / height (ratio)
+        0.1f,                                               // the near clipping plane (no clue what that mean)
+        10.0f                                               // the far clipping plane (no clue what that mean)
     );
 
     // GLM uses an OpenGL-style Y axis; Vulkan's clip-space Y axis is inverted.
@@ -217,17 +218,41 @@ int main() {
             "Vulkan learning renderer",
             mesh,
             TEXTURE_PATH);
+        
+        CameraController camera(
+            renderer, 
+            glm::vec3(4.0f, 4.0f, 0.0f),        // initial position
+            glm::vec3(0.0f, 0.0f, 0.0f)         // initial target
+        );
 
-        const auto startTime = std::chrono::steady_clock::now();
+
+        // While 1 forever loop body
+        // ########################################################################
+        auto previousTime = std::chrono::steady_clock::now();
         while (!renderer.shouldClose()) {
+            // No clue tbh
             renderer.pollEvents();
+            
+            // Update lock
+            const auto now = std::chrono::steady_clock::now();
+            const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
+            previousTime = now;
 
-            const float timeSeconds = std::chrono::duration<float>(
-                std::chrono::steady_clock::now() - startTime).count();
+            // Get camera inputs 
+            camera.update(deltaSeconds);
 
-            renderer.drawFrame(makeTransforms(timeSeconds, renderer.aspectRatio()));
+            // Draw frame 
+            renderer.drawFrame(
+                makeTransforms(
+                    deltaSeconds, 
+                    renderer.aspectRatio(),
+                    camera.state()
+                )
+            );
         }
-    } catch (const std::exception& error) {
+        // ########################################################################
+    } 
+    catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return EXIT_FAILURE;
     }

@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+class CameraController;
+
 // CPU-side geometry. The application owns and fills this ordinary memory.
 struct Vertex {
     glm::vec3 position;
@@ -53,6 +55,12 @@ public:
     void drawFrame(const SceneTransforms& transforms);
 
 private:
+    friend class CameraController;
+
+    // Used by platform-facing helpers such as CameraController. GLFW remains
+    // out of this public header and out of the application code.
+    void* nativeWindowHandle() const;
+
     class Impl;
     std::unique_ptr<Impl> impl;
 };

@@ -139,6 +139,10 @@ public:
         drawFrameInternal(transforms);
     }
 
+    void* nativeWindowHandle() const {
+        return window;
+    }
+
 private:
     uint32_t width;
     uint32_t height;
@@ -1572,4 +1576,8 @@ float Renderer::aspectRatio() const {
 
 void Renderer::drawFrame(const SceneTransforms& transforms) {
     impl->drawFrame(transforms);
+}
+
+void* Renderer::nativeWindowHandle() const {
+    return impl->nativeWindowHandle();
 }
