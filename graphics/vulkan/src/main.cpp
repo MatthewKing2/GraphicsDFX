@@ -2,6 +2,7 @@
 #include "camera.hpp"
 #include <cmath>
 #include <numbers>
+#include <random>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
@@ -279,14 +280,13 @@ Mesh loadObj(const std::string& path) {
 }
 
 
-glm::mat4 makeModelMatrixStar(float timeSeconds, float radius, float phase_offset){
+glm::mat4 makeModelMatrixStar(float timeSeconds, float radius, float speed, float phase_offset, float z_offset){
     float pi = (float)(4.0 * std::atan(1.0));
-    float slow_down = 1;
-    float theta = (60*timeSeconds + phase_offset) * (pi / 180.0) * slow_down;
+    float theta = (60*timeSeconds + phase_offset) * (pi / 180.0) * speed;
     float x = (float)(radius * std::sin(theta));
     float y = (float)(radius * std::cos(theta));
 
-    glm::vec3 translation_vector = glm::vec3(x, y, 4.0f);
+    glm::vec3 translation_vector = glm::vec3(x, y, z_offset);
 
     return glm::translate(glm::mat4(1.0f), translation_vector);
 }
@@ -329,6 +329,14 @@ FrameTransforms makeTransforms(float aspectRatio, const CameraState& camera) {
 
 } // namespace
 
+// A function that returns a pseudo-random number based entirely on the input_number
+int getRandomFromInput(int input_number, int min_range, int max_range) {
+    std::mt19937 engine(input_number);
+    std::uniform_int_distribution<int> distribution(min_range, max_range);
+    return distribution(engine);
+}
+
+
 int main() {
     try {
         // Mesh mesh = loadObj(MODEL_PATH);
@@ -338,9 +346,9 @@ int main() {
             makeQuad(2.0f),     // 2.0 z_offset
         };
 
-        int NUM_SPHERES = 30;
+        int NUM_SPHERES = 300;
         for(int i = 0; i < NUM_SPHERES; i ++){
-            meshes.push_back(makeSphere(0.05f, 0.0f));
+            meshes.push_back(makeSphere(0.025f, 0.0f));
         }
 
 
@@ -382,7 +390,13 @@ int main() {
             modelMatrices[1] = makeModelMatrix(totalSeconds, 45.0f, glm::vec3(1.0f, 0.0f, 0.0f));
             modelMatrices[2] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
             for(int i = 0; i < NUM_SPHERES; i ++){
-                glm::mat4 sphere_model_matrix = makeModelMatrixStar(totalSeconds, 2.0, i*12.0);
+                // Radius, Speed, Phase Offset, z_offset
+                int radius = getRandomFromInput(i, 1, 1000);
+                int speed = getRandomFromInput(i+7, 10, 1000);
+                int phase_off = getRandomFromInput(i+13, 0, 360);
+                int z_off = getRandomFromInput(i+42, 1, 100);
+
+                glm::mat4 sphere_model_matrix = makeModelMatrixStar(totalSeconds, radius/250.0, ((float)speed/(float)radius), float(phase_off), z_off/100.0);
                 modelMatrices[3+i] = sphere_model_matrix;
             }
 
