@@ -166,38 +166,23 @@ Mesh loadObj(const std::string& path) {
     return mesh;
 }
 
-SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const CameraState& camera, int meshNum) {
+glm::mat4 makeModelMatrix(float timeSeconds, float degreesPerSecond, const glm::vec3& axis) {
+    // Per-object math remains here, not in the renderer.
+    return glm::rotate(
+        glm::mat4(1.0f),
+        timeSeconds * glm::radians(degreesPerSecond),
+        axis);
+}
+
+FrameTransforms makeTransforms(float aspectRatio, const CameraState& camera) {
 
     // Your mesh stores vertex positions. The model, view, and projection matrices transform those positions to determine where the mesh appears on screen.
     // - Model: Places the mesh in the world. Your square might be defined around (0, 0, 0); this matrix can move it somewhere else, rotate it, or resize it.
     // - View: Expresses the world relative to the camera. It accounts for where the camera is and which way it faces.
     // - Projection: Determines how that camera’s view becomes a flat image. A perspective projection makes distant objects appear smaller; an orthographic projection keeps their size independent of distance.
 
-    // struct SceneTransforms {
-    //     alignas(16) glm::mat4 model;         // 4x4 matrix of fp32, alignas(16) tells compiler to put this memory at 16byte alignment 
-    //     alignas(16) glm::mat4 view;          // 4x4 matrix of fp32
-    //     alignas(16) glm::mat4 projection;    // 4x4 matrix of fp32
-    // };
-
-    SceneTransforms transforms{};
-
-    if(meshNum == 0){
-    transforms.model = glm::rotate(
-        glm::mat4(1.0f),                        // identiy matrix 
-        timeSeconds * glm::radians(90.0f),      // rotating 90 radians per second 
-        glm::vec3(0.0f, 1.0f, 0.0f)             // around the y axis (x,y,z)
-    );
-    }
-
-    if(meshNum == 1){
-    transforms.model = glm::rotate(
-        glm::mat4(1.0f),                        // identiy matrix 
-        timeSeconds * glm::radians(45.0f),      // rotating 90 radians per second 
-        glm::vec3(1.0f, 0.0f, 0.0f)             // around the x axis (x,y,z)
-    );
-    }
-
-
+    // Shared camera matrices; model matrices are kept separately per mesh.
+    FrameTransforms transforms{};
     transforms.view = glm::lookAt(
         camera.position,                    // where camera is in the world (x, y, z)
         camera.position + camera.forward,   // point the camera looks towards 
@@ -221,15 +206,18 @@ SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const Camer
 int main() {
     try {
         // Mesh mesh = loadObj(MODEL_PATH);
-        Mesh mesh0 = makeQuad(0.0); // 0.0 z_offset
-        Mesh mesh1 = makeQuad(1.0); // 1.0 z_offset
+        std::vector<Mesh> meshes{
+            makeQuad(0.0f), // 0.0 z_offset
+            makeQuad(1.0f), // 1.0 z_offset
+            makeQuad(2.0f)  // 2.0 z_offset
+        };
+        std::vector<glm::mat4> modelMatrices(meshes.size(), glm::mat4(1.0f));
 
         Renderer renderer(
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             "Vulkan learning renderer",
-            mesh0,
-            mesh1,
+            meshes,
             TEXTURE_PATH);
         
         CameraController camera(
@@ -256,21 +244,14 @@ int main() {
             // Get camera inputs 
             camera.update(deltaSeconds);
 
-            // Draw frame 
-            renderer.drawFrame(
-                makeTransforms(                 // mesh 0's transform 
-                    totalSeconds, 
-                    renderer.aspectRatio(),
-                    camera.state(),
-                    0
-                ),
-                makeTransforms(                 // mesh 1's transform
-                    totalSeconds, 
-                    renderer.aspectRatio(),
-                    camera.state(),
-                    1
-                )
-            );
+            // Keep the original two rotations. Entry i belongs to meshes[i].
+            modelMatrices[0] = makeModelMatrix(totalSeconds, 90.0f, glm::vec3(0.0f, 1.0f, 0.0f));
+            modelMatrices[1] = makeModelMatrix(totalSeconds, 45.0f, glm::vec3(1.0f, 0.0f, 0.0f));
+            modelMatrices[2] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
+
+            // Compute view/projection once and draw every uploaded mesh.
+            const FrameTransforms transforms = makeTransforms(renderer.aspectRatio(), camera.state());
+            renderer.drawFrame(transforms, modelMatrices);
         }
         // ########################################################################
     } 

@@ -13,6 +13,7 @@
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <array>
@@ -94,7 +95,9 @@ static std::array<VkVertexInputAttributeDescription, 3> vertexAttributeDescripti
     return descriptions;
 }
 
-using UniformBufferObject = SceneTransforms;
+static_assert(sizeof(glm::mat4) == 64, "shader expects a 64-byte model matrix");
+static_assert(sizeof(FrameTransforms) == 128, "shader expects two packed mat4s");
+static_assert(offsetof(FrameTransforms, projection) == 64, "shader matrix offsets must match");
 
 class Renderer::Impl {
 public:
@@ -102,24 +105,29 @@ public:
         uint32_t initialWidth,
         uint32_t initialHeight,
         const char* windowTitle,
-        const Mesh& mesh0,
-        const Mesh& mesh1,
+        const std::vector<Mesh>& meshes,
         const std::string& initialTexturePath)
         : width(initialWidth),
           height(initialHeight),
           title(windowTitle),
-          texturePath(initialTexturePath),
-          vertices0(mesh0.vertices),
-          indices0(mesh0.indices),
-          vertices1(mesh1.vertices),
-          indices1(mesh1.indices) {
-        if (vertices0.empty() || indices0.empty() ||
-            vertices1.empty() || indices1.empty()) {
-            throw std::runtime_error("cannot create a renderer with an empty mesh");
+          texturePath(initialTexturePath) {
+        // Validate before allocating Vulkan resources. An empty scene is allowed.
+        for (const auto& mesh : meshes) {
+            if (mesh.vertices.empty() || mesh.indices.empty()) {
+                throw std::invalid_argument("each mesh must contain vertices and indices");
+            }
+            if (mesh.indices.size() > std::numeric_limits<uint32_t>::max()) {
+                throw std::invalid_argument("mesh has too many indices for an indexed draw");
+            }
+            for (auto index : mesh.indices) {
+                if (index >= mesh.vertices.size()) {
+                    throw std::invalid_argument("mesh index is outside its vertex array");
+                }
+            }
         }
 
         initWindow();
-        initVulkan();
+        initVulkan(meshes);
     }
 
     ~Impl() {
@@ -139,63 +147,66 @@ public:
         return swapChainExtent.width / static_cast<float>(swapChainExtent.height);
     }
 
-    void drawFrame(const SceneTransforms& transforms0, const SceneTransforms& transforms1) {
-        drawFrameInternal(transforms0, transforms1);
+    void drawFrame(
+        const FrameTransforms& transforms,
+        const std::vector<glm::mat4>& modelMatrices) {
+        if (modelMatrices.size() != gpuMeshes.size()) {
+            throw std::invalid_argument("provide exactly one model matrix per uploaded mesh");
+        }
+        drawFrameInternal(transforms, modelMatrices);
     }
 
     void* nativeWindowHandle() const {
         return window;
     }
 
-    // Helper function to create buffer and copy source Mesh into destination memory (generic to verticies and indicies copies)
+    // Upload static geometry through CPU-visible staging memory into device-local memory.
     void uploadMeshBuffer(
         const void* source,
         VkDeviceSize bytes,
         VkBufferUsageFlags usage,
         VkBuffer& destination,
-        VkDeviceMemory& destinationMemory) 
-    {
+        VkDeviceMemory& destinationMemory) {
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingMemory;
 
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
+        createBuffer(
+            bytes,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            stagingBuffer,
+            stagingMemory);
 
-    createBuffer(
-        bytes,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingBuffer,
-        stagingMemory);
+        void* mapped = nullptr;
+        if (vkMapMemory(device, stagingMemory, 0, bytes, 0, &mapped)
+                != VK_SUCCESS) {
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingMemory, nullptr);
+            throw std::runtime_error("failed to map mesh staging memory");
+        }
 
-    void* mapped = nullptr;
-    if (vkMapMemory(device, stagingMemory, 0, bytes, 0, &mapped)
-            != VK_SUCCESS) {
+        memcpy(mapped, source, static_cast<size_t>(bytes));
+        vkUnmapMemory(device, stagingMemory);
+
+        createBuffer(
+            bytes,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            destination,
+            destinationMemory);
+
+        copyBuffer(stagingBuffer, destination, bytes);
+
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingMemory, nullptr);
-        throw std::runtime_error("failed to map mesh staging memory");
-    }
-
-    memcpy(mapped, source, static_cast<size_t>(bytes));
-    vkUnmapMemory(device, stagingMemory);
-
-    createBuffer(
-        bytes,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-        destination,
-        destinationMemory);
-
-    copyBuffer(stagingBuffer, destination, bytes);
-
-    vkDestroyBuffer(device, stagingBuffer, nullptr);
-    vkFreeMemory(device, stagingMemory, nullptr);
     }
 
     void recordMeshDraw(
         VkCommandBuffer commandBuffer,
         VkBuffer vertices,
         VkBuffer indices,
-        VkDescriptorSet descriptors,
+        const glm::mat4& model,
         uint32_t indexCount) {
 
         const VkDeviceSize offset = 0;
@@ -206,12 +217,11 @@ public:
         vkCmdBindIndexBuffer(
             commandBuffer, indices, 0, VK_INDEX_TYPE_UINT32);
 
-        vkCmdBindDescriptorSets(
-            commandBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            pipelineLayout,
-            0, 1, &descriptors,
-            0, nullptr);
+        // Vulkan copies these 64 bytes into the recorded command state.
+        // This draw sees this model, even after a later draw pushes another one.
+        vkCmdPushConstants(
+            commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+            0, sizeof(model), &model);
 
         vkCmdDrawIndexed(
             commandBuffer, indexCount, 1, 0, 0, 0);
@@ -259,32 +269,25 @@ private:
     VkImageView textureImageView;
     VkSampler textureSampler;
 
-    // Mesh 0: 
-    std::vector<Vertex> vertices0;
-    std::vector<uint32_t> indices0;
-    VkBuffer vertexBuffer0;
-    VkDeviceMemory vertexBufferMemory0;
-    VkBuffer indexBuffer0;
-    VkDeviceMemory indexBufferMemory0;
+    // CPU bookkeeping for GPU-resident geometry. No duplicate CPU vertex arrays.
+    struct GpuMesh {
+        VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
+    };
+    std::vector<GpuMesh> gpuMeshes;
 
-    // Mesh 1: 
-    std::vector<Vertex> vertices1;
-    std::vector<uint32_t> indices1;
-    VkBuffer vertexBuffer1;
-    VkDeviceMemory vertexBufferMemory1;
-    VkBuffer indexBuffer1;
-    VkDeviceMemory indexBufferMemory1;
-
-    // std::vector<VkBuffer> uniformBuffers;
-    std::array<std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT>, 2> uniformBuffers{};
-    // std::vector<VkDeviceMemory> uniformBuffersMemory;
-    std::array<std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT>, 2> uniformBuffersMemory{};
-    // std::vector<void*> uniformBuffersMapped;
-    std::array<std::array<void*, MAX_FRAMES_IN_FLIGHT>, 2> uniformBuffersMapped{};
-
+    // One shared camera UBO per in-flight frame, independent of mesh count.
+    struct FrameResources {
+        VkBuffer uniformBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory uniformMemory = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    };
+    std::array<FrameResources, MAX_FRAMES_IN_FLIGHT> frames{};
     VkDescriptorPool descriptorPool;
-    // std::vector<VkDescriptorSet> descriptorSets;
-    std::array<std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>, 2> descriptorSets{};
 
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -310,7 +313,7 @@ private:
         app->framebufferResized = true;
     }
 
-    void initVulkan() {
+    void initVulkan(const std::vector<Mesh>& meshes) {
         createInstance();
         setupDebugMessenger();
         createSurface();
@@ -327,8 +330,7 @@ private:
         createTextureImage();
         createTextureImageView();
         createTextureSampler();
-        createVertexBuffer();
-        createIndexBuffer();
+        createMeshBuffers(meshes);
         createUniformBuffers();
         createDescriptorPool();
         createDescriptorSets();
@@ -364,12 +366,10 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
 
-        for (size_t mesh = 0; mesh < 2; ++mesh) {
-            for (size_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; ++frame) {
-                vkUnmapMemory(device, uniformBuffersMemory[mesh][frame]);
-                vkDestroyBuffer(device, uniformBuffers[mesh][frame], nullptr);
-                vkFreeMemory(device, uniformBuffersMemory[mesh][frame], nullptr);
-            }
+        for (auto& frame : frames) {
+            vkUnmapMemory(device, frame.uniformMemory);
+            vkDestroyBuffer(device, frame.uniformBuffer, nullptr);
+            vkFreeMemory(device, frame.uniformMemory, nullptr);
         }
 
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
@@ -382,15 +382,12 @@ private:
 
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-        vkDestroyBuffer(device, indexBuffer0, nullptr);
-        vkFreeMemory(device, indexBufferMemory0, nullptr);
-        vkDestroyBuffer(device, vertexBuffer0, nullptr);
-        vkFreeMemory(device, vertexBufferMemory0, nullptr);
-
-        vkDestroyBuffer(device, indexBuffer1, nullptr);
-        vkFreeMemory(device, indexBufferMemory1, nullptr);
-        vkDestroyBuffer(device, vertexBuffer1, nullptr);
-        vkFreeMemory(device, vertexBufferMemory1, nullptr);
+        for (const auto& mesh : gpuMeshes) {
+            vkDestroyBuffer(device, mesh.indexBuffer, nullptr);
+            vkFreeMemory(device, mesh.indexMemory, nullptr);
+            vkDestroyBuffer(device, mesh.vertexBuffer, nullptr);
+            vkFreeMemory(device, mesh.vertexMemory, nullptr);
+        }
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
@@ -796,10 +793,17 @@ private:
         dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
         dynamicState.pDynamicStates = dynamicStates.data();
 
+        VkPushConstantRange modelRange{};
+        modelRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        modelRange.offset = 0;
+        modelRange.size = sizeof(glm::mat4);
+
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = 1;
         pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &modelRange;
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -1084,64 +1088,44 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
-    // Vertext buffer that gets sent to GPU mem
-    void createVertexBuffer() {
-        uploadMeshBuffer(
-            vertices0.data(),
-            sizeof(Vertex) * vertices0.size(),
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            vertexBuffer0,
-            vertexBufferMemory0);
-        uploadMeshBuffer(
-            vertices1.data(),
-            sizeof(Vertex) * vertices1.size(),
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-            vertexBuffer1,
-            vertexBufferMemory1);
-    }
-
-    // Index buffer that gets sent to GPU mem
-    void createIndexBuffer() {
-        uploadMeshBuffer(
-            indices0.data(),
-            sizeof(indices0[0]) * indices0.size(),
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            indexBuffer0,
-            indexBufferMemory0);
-        uploadMeshBuffer(
-            indices1.data(),
-            sizeof(indices1[0]) * indices1.size(),
-            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-            indexBuffer1,
-            indexBufferMemory1);
+    // Startup only: each mesh owns one vertex buffer and one index buffer.
+    void createMeshBuffers(const std::vector<Mesh>& meshes) {
+        gpuMeshes.resize(meshes.size());
+        for (size_t i = 0; i < meshes.size(); ++i) {
+            const auto& source = meshes[i];
+            auto& destination = gpuMeshes[i];
+            destination.indexCount = static_cast<uint32_t>(source.indices.size());
+            uploadMeshBuffer(
+                source.vertices.data(),
+                sizeof(Vertex) * source.vertices.size(),
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                destination.vertexBuffer, destination.vertexMemory);
+            uploadMeshBuffer(
+                source.indices.data(),
+                sizeof(uint32_t) * source.indices.size(),
+                VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                destination.indexBuffer, destination.indexMemory);
+        }
     }
 
     void createUniformBuffers() {
-        const VkDeviceSize bytes = sizeof(UniformBufferObject);
-
-        for (size_t mesh = 0; mesh < 2; ++mesh) {
-            for (size_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; ++frame) {
-                createBuffer(
-                    bytes,
-                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                    uniformBuffers[mesh][frame],
-                    uniformBuffersMemory[mesh][frame]);
-
-                if (vkMapMemory(
-                        device,
-                        uniformBuffersMemory[mesh][frame],
-                        0, bytes, 0,
-                        &uniformBuffersMapped[mesh][frame]) != VK_SUCCESS) {
-                    throw std::runtime_error("failed to map uniform memory");
-                }
+        const VkDeviceSize bytes = sizeof(FrameTransforms);
+        for (auto& frame : frames) {
+            createBuffer(
+                bytes,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                frame.uniformBuffer, frame.uniformMemory);
+            if (vkMapMemory(device, frame.uniformMemory, 0, bytes, 0,
+                            &frame.mapped) != VK_SUCCESS) {
+                throw std::runtime_error("failed to map uniform memory");
             }
         }
     }
 
     void createDescriptorPool() {
-        const uint32_t setCount = 2 * MAX_FRAMES_IN_FLIGHT;
+        const uint32_t setCount = MAX_FRAMES_IN_FLIGHT;
 
         std::array<VkDescriptorPoolSize, 2> sizes{};
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1165,54 +1149,47 @@ private:
         std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT> layouts;
         layouts.fill(descriptorSetLayout);
 
-        for (size_t mesh = 0; mesh < 2; ++mesh) {
-            VkDescriptorSetAllocateInfo allocation{};
-            allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            allocation.descriptorPool = descriptorPool;
-            allocation.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
-            allocation.pSetLayouts = layouts.data();
+        VkDescriptorSetAllocateInfo allocation{};
+        allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocation.descriptorPool = descriptorPool;
+        allocation.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+        allocation.pSetLayouts = layouts.data();
+        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> sets{};
+        if (vkAllocateDescriptorSets(device, &allocation, sets.data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate descriptor sets");
+        }
 
-            if (vkAllocateDescriptorSets(
-                    device,
-                    &allocation,
-                    descriptorSets[mesh].data()) != VK_SUCCESS) {
-                throw std::runtime_error("failed to allocate descriptor sets");
-            }
+        for (size_t i = 0; i < frames.size(); ++i) {
+            auto& frame = frames[i];
+            frame.descriptorSet = sets[i];
 
-            for (size_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; ++frame) {
-                VkDescriptorBufferInfo buffer{};
-                buffer.buffer = uniformBuffers[mesh][frame];
-                buffer.offset = 0;
-                buffer.range = sizeof(UniformBufferObject);
+            VkDescriptorBufferInfo buffer{};
+            buffer.buffer = frame.uniformBuffer;
+            buffer.offset = 0;
+            buffer.range = sizeof(FrameTransforms);
 
-                VkDescriptorImageInfo image{};
-                image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                image.imageView = textureImageView;
-                image.sampler = textureSampler;
+            VkDescriptorImageInfo image{};
+            image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            image.imageView = textureImageView;
+            image.sampler = textureSampler;
 
-                std::array<VkWriteDescriptorSet, 2> writes{};
+            std::array<VkWriteDescriptorSet, 2> writes{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = frame.descriptorSet;
+            writes[0].dstBinding = 0;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[0].descriptorCount = 1;
+            writes[0].pBufferInfo = &buffer;
 
-                writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[0].dstSet = descriptorSets[mesh][frame];
-                writes[0].dstBinding = 0;
-                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                writes[0].descriptorCount = 1;
-                writes[0].pBufferInfo = &buffer;
+            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet = frame.descriptorSet;
+            writes[1].dstBinding = 1;
+            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[1].descriptorCount = 1;
+            writes[1].pImageInfo = &image;
 
-                writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[1].dstSet = descriptorSets[mesh][frame];
-                writes[1].dstBinding = 1;
-                writes[1].descriptorType =
-                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                writes[1].descriptorCount = 1;
-                writes[1].pImageInfo = &image;
-
-                vkUpdateDescriptorSets(
-                    device,
-                    static_cast<uint32_t>(writes.size()),
-                    writes.data(),
-                    0, nullptr);
-            }
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
+                                   writes.data(), 0, nullptr);
         }
     }
 
@@ -1312,7 +1289,10 @@ private:
         }
     }
 
-    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
+    void recordCommandBuffer(
+        VkCommandBuffer commandBuffer,
+        uint32_t imageIndex,
+        const std::vector<glm::mat4>& modelMatrices) {
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -1336,37 +1316,32 @@ private:
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(swapChainExtent.width);
+        viewport.height = static_cast<float>(swapChainExtent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            // VkBuffer vertexBuffers[] = {vertexBuffer};
-            // VkDeviceSize offsets[] = {0};
-            // vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            // vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            // vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
-            // vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
-            // Each indexed draw consumes this mesh's index entries, not its vertex count.
-            recordMeshDraw(
-                commandBuffer, vertexBuffer0, indexBuffer0,
-                descriptorSets[0][currentFrame],
-                static_cast<uint32_t>(indices0.size()));
-            recordMeshDraw(
-                commandBuffer, vertexBuffer1, indexBuffer1,
-                descriptorSets[1][currentFrame],
-                static_cast<uint32_t>(indices1.size()));
+        // All draws use the same view/projection and (currently) texture.
+        vkCmdBindDescriptorSets(
+            commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+            0, 1, &frames[currentFrame].descriptorSet, 0, nullptr);
+
+        for (size_t i = 0; i < gpuMeshes.size(); ++i) {
+            const auto& mesh = gpuMeshes[i];
+            recordMeshDraw(commandBuffer, mesh.vertexBuffer, mesh.indexBuffer,
+                           modelMatrices[i], mesh.indexCount);
+        }
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -1409,18 +1384,13 @@ private:
         }
     }
 
-    void updateUniformBuffer(
-        uint32_t meshIndex,
-        uint32_t frameIndex,
-        const SceneTransforms& transforms) {
-
-        memcpy(
-            uniformBuffersMapped[meshIndex][frameIndex],
-            &transforms,
-            sizeof(transforms));
+    void updateUniformBuffer(uint32_t frameIndex, const FrameTransforms& transforms) {
+        memcpy(frames[frameIndex].mapped, &transforms, sizeof(transforms));
     }
 
-    void drawFrameInternal(const SceneTransforms& transforms0, const SceneTransforms& transforms1) {
+    void drawFrameInternal(
+        const FrameTransforms& transforms,
+        const std::vector<glm::mat4>& modelMatrices) {
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         uint32_t imageIndex;
@@ -1433,14 +1403,13 @@ private:
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
-        // updateUniformBuffer(currentFrame, transforms);
-        updateUniformBuffer(0, currentFrame, transforms0);  // mesh 0
-        updateUniformBuffer(1, currentFrame, transforms1);  // mesh 1
+        // The fence guarantees this frame slot is no longer being read by the GPU.
+        updateUniformBuffer(currentFrame, transforms);
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
         vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
-        recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex, modelMatrices);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1696,10 +1665,9 @@ Renderer::Renderer(
     uint32_t width,
     uint32_t height,
     const char* title,
-    const Mesh& mesh0,
-    const Mesh& mesh1,
+    const std::vector<Mesh>& meshes,
     const std::string& texturePath)
-    : impl(std::make_unique<Impl>(width, height, title, mesh0, mesh1, texturePath)) {
+    : impl(std::make_unique<Impl>(width, height, title, meshes, texturePath)) {
 }
 
 Renderer::~Renderer() = default;
@@ -1716,8 +1684,10 @@ float Renderer::aspectRatio() const {
     return impl->aspectRatio();
 }
 
-void Renderer::drawFrame(const SceneTransforms& transforms0, const SceneTransforms& transforms1) {
-    impl->drawFrame(transforms0, transforms1);
+void Renderer::drawFrame(
+    const FrameTransforms& transforms,
+    const std::vector<glm::mat4>& modelMatrices) {
+    impl->drawFrame(transforms, modelMatrices);
 }
 
 void* Renderer::nativeWindowHandle() const {

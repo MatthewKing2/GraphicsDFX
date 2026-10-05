@@ -30,20 +30,20 @@ struct Mesh {
 };
 
 // The application computes these matrices; the renderer only transfers them.
-struct SceneTransforms {
-    alignas(16) glm::mat4 model;
-    alignas(16) glm::mat4 view;
-    alignas(16) glm::mat4 projection;
+struct FrameTransforms {
+    alignas(16) glm::mat4 view{1.0f};
+    alignas(16) glm::mat4 projection{1.0f};
 };
 
 class Renderer {
 public:
+    // Uploads a fixed list of meshes once. Later edits to the CPU meshes do not
+    // change the uploaded geometry; the caller may also release the CPU copies.
     Renderer(
         std::uint32_t width,
         std::uint32_t height,
         const char* title,
-        const Mesh& mesh0,
-        const Mesh& mesh1,
+        const std::vector<Mesh>& meshes,
         const std::string& texturePath);
     ~Renderer();
 
@@ -53,7 +53,11 @@ public:
     bool shouldClose() const;
     void pollEvents() const;
     float aspectRatio() const;
-    void drawFrame(const SceneTransforms& transforms0, const SceneTransforms& transforms1); // note that view and project are shared, so this is bad on mem cpy 
+    // modelMatrices[i] transforms meshes[i]; the counts must match exactly.
+    // Only matrices are transferred each frame. No CPU pointers are retained.
+    void drawFrame(
+        const FrameTransforms& transforms,
+        const std::vector<glm::mat4>& modelMatrices);
 
 private:
     friend class CameraController;
