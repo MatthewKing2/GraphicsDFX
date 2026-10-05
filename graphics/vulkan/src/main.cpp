@@ -64,14 +64,14 @@ Mesh makeSphere(float radius, float z_offset){
 
         Vertex v_i{};
         v_i.position = {x, y, z_offset};
-        v_i.color = {0.0, 1.0, 0.0};
+        v_i.color = {1.0, 1.0, 1.0};
         matthew_sphere.vertices.push_back(v_i);
     }
 
     // 8 verticies upper and lower ring: 
     float phi = (45.0/2); // phase offshift 
     float smaller_radius = 0.75 * radius; 
-    float rise = 0.5;
+    float rise = radius/2;
     for(int i = 0; i < 8; i ++){
         float theta = (i*(360.0 / 8.0) + phi)*(pi / 180.0);
         float x = (float)(smaller_radius * std::sin(theta));
@@ -79,7 +79,7 @@ Mesh makeSphere(float radius, float z_offset){
 
         Vertex v_i{};
         v_i.position = {x, y, z_offset + rise};
-        v_i.color = {1.0, 0.0, 0.0};
+        v_i.color = {1.0, 1.0, 1.0};
         matthew_sphere.vertices.push_back(v_i);
     }
     for(int i = 0; i < 8; i ++){
@@ -89,7 +89,7 @@ Mesh makeSphere(float radius, float z_offset){
 
         Vertex v_i{};
         v_i.position = {x, y, z_offset - rise};
-        v_i.color = {1.0, 0.0, 0.0};
+        v_i.color = {1.0, 1.0, 1.0};
         matthew_sphere.vertices.push_back(v_i);
     }
 
@@ -129,12 +129,12 @@ Mesh makeSphere(float radius, float z_offset){
 
     // two more verticies for the top and bottom 
     Vertex v_u{};
-    v_u.position = {0.0, 0.0, z_offset + 2*rise};
-    v_u.color = {0.0, 0.0, 1.0};
+    v_u.position = {0.0, 0.0, z_offset + radius};
+    v_u.color = {1.0, 1.0, 1.0};
     matthew_sphere.vertices.push_back(v_u);
     Vertex v_b{};
-    v_b.position = {0.0, 0.0, z_offset - 2*rise};
-    v_b.color = {0.0, 0.0, 1.0};
+    v_b.position = {0.0, 0.0, z_offset - radius};
+    v_b.color = {1.0, 1.0, 1.0};
     matthew_sphere.vertices.push_back(v_b);
 
 
@@ -278,6 +278,20 @@ Mesh loadObj(const std::string& path) {
     return mesh;
 }
 
+
+glm::mat4 makeModelMatrixStar(float timeSeconds, float radius, float phase_offset){
+    float pi = (float)(4.0 * std::atan(1.0));
+    float slow_down = 1;
+    float theta = (60*timeSeconds + phase_offset) * (pi / 180.0) * slow_down;
+    float x = (float)(radius * std::sin(theta));
+    float y = (float)(radius * std::cos(theta));
+
+    glm::vec3 translation_vector = glm::vec3(x, y, 4.0f);
+
+    return glm::translate(glm::mat4(1.0f), translation_vector);
+}
+
+
 glm::mat4 makeModelMatrix(float timeSeconds, float degreesPerSecond, const glm::vec3& axis) {
     // Per-object math remains here, not in the renderer.
     return glm::rotate(
@@ -322,8 +336,14 @@ int main() {
             makeQuad(0.0f),     // 0.0 z_offset
             makeQuad(1.0f),     // 1.0 z_offset
             makeQuad(2.0f),     // 2.0 z_offset
-            makeSphere(1.0f, 4.0f)    // 4.0 z_offset
         };
+
+        int NUM_SPHERES = 30;
+        for(int i = 0; i < NUM_SPHERES; i ++){
+            meshes.push_back(makeSphere(0.05f, 0.0f));
+        }
+
+
         std::vector<glm::mat4> modelMatrices(meshes.size(), glm::mat4(1.0f));
 
         Renderer renderer(
@@ -361,7 +381,10 @@ int main() {
             modelMatrices[0] = makeModelMatrix(totalSeconds, 90.0f, glm::vec3(0.0f, 1.0f, 0.0f));
             modelMatrices[1] = makeModelMatrix(totalSeconds, 45.0f, glm::vec3(1.0f, 0.0f, 0.0f));
             modelMatrices[2] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
-            modelMatrices[3] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
+            for(int i = 0; i < NUM_SPHERES; i ++){
+                glm::mat4 sphere_model_matrix = makeModelMatrixStar(totalSeconds, 2.0, i*12.0);
+                modelMatrices[3+i] = sphere_model_matrix;
+            }
 
             // Compute view/projection once and draw every uploaded mesh.
             const FrameTransforms transforms = makeTransforms(renderer.aspectRatio(), camera.state());
