@@ -102,15 +102,19 @@ public:
         uint32_t initialWidth,
         uint32_t initialHeight,
         const char* windowTitle,
-        const Mesh& mesh,
+        const Mesh& mesh0,
+        const Mesh& mesh1,
         const std::string& initialTexturePath)
         : width(initialWidth),
           height(initialHeight),
           title(windowTitle),
           texturePath(initialTexturePath),
-          vertices(mesh.vertices),
-          indices(mesh.indices) {
-        if (vertices.empty() || indices.empty()) {
+          vertices0(mesh0.vertices),
+          indices0(mesh0.indices),
+          vertices1(mesh1.vertices),
+          indices1(mesh1.indices) {
+        if (vertices0.empty() || indices0.empty() ||
+            vertices1.empty() || indices1.empty()) {
             throw std::runtime_error("cannot create a renderer with an empty mesh");
         }
 
@@ -135,13 +139,84 @@ public:
         return swapChainExtent.width / static_cast<float>(swapChainExtent.height);
     }
 
-    void drawFrame(const SceneTransforms& transforms) {
-        drawFrameInternal(transforms);
+    void drawFrame(const SceneTransforms& transforms0, const SceneTransforms& transforms1) {
+        drawFrameInternal(transforms0, transforms1);
     }
 
     void* nativeWindowHandle() const {
         return window;
     }
+
+    // Helper function to create buffer and copy source Mesh into destination memory (generic to verticies and indicies copies)
+    void uploadMeshBuffer(
+        const void* source,
+        VkDeviceSize bytes,
+        VkBufferUsageFlags usage,
+        VkBuffer& destination,
+        VkDeviceMemory& destinationMemory) 
+    {
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingMemory;
+
+    createBuffer(
+        bytes,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer,
+        stagingMemory);
+
+    void* mapped = nullptr;
+    if (vkMapMemory(device, stagingMemory, 0, bytes, 0, &mapped)
+            != VK_SUCCESS) {
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingMemory, nullptr);
+        throw std::runtime_error("failed to map mesh staging memory");
+    }
+
+    memcpy(mapped, source, static_cast<size_t>(bytes));
+    vkUnmapMemory(device, stagingMemory);
+
+    createBuffer(
+        bytes,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        destination,
+        destinationMemory);
+
+    copyBuffer(stagingBuffer, destination, bytes);
+
+    vkDestroyBuffer(device, stagingBuffer, nullptr);
+    vkFreeMemory(device, stagingMemory, nullptr);
+    }
+
+    void recordMeshDraw(
+        VkCommandBuffer commandBuffer,
+        VkBuffer vertices,
+        VkBuffer indices,
+        VkDescriptorSet descriptors,
+        uint32_t indexCount) {
+
+        const VkDeviceSize offset = 0;
+
+        vkCmdBindVertexBuffers(
+            commandBuffer, 0, 1, &vertices, &offset);
+
+        vkCmdBindIndexBuffer(
+            commandBuffer, indices, 0, VK_INDEX_TYPE_UINT32);
+
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            pipelineLayout,
+            0, 1, &descriptors,
+            0, nullptr);
+
+        vkCmdDrawIndexed(
+            commandBuffer, indexCount, 1, 0, 0, 0);
+    }
+
 
 private:
     uint32_t width;
@@ -184,19 +259,32 @@ private:
     VkImageView textureImageView;
     VkSampler textureSampler;
 
-    std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
-    VkBuffer vertexBuffer;
-    VkDeviceMemory vertexBufferMemory;
-    VkBuffer indexBuffer;
-    VkDeviceMemory indexBufferMemory;
+    // Mesh 0: 
+    std::vector<Vertex> vertices0;
+    std::vector<uint32_t> indices0;
+    VkBuffer vertexBuffer0;
+    VkDeviceMemory vertexBufferMemory0;
+    VkBuffer indexBuffer0;
+    VkDeviceMemory indexBufferMemory0;
 
-    std::vector<VkBuffer> uniformBuffers;
-    std::vector<VkDeviceMemory> uniformBuffersMemory;
-    std::vector<void*> uniformBuffersMapped;
+    // Mesh 1: 
+    std::vector<Vertex> vertices1;
+    std::vector<uint32_t> indices1;
+    VkBuffer vertexBuffer1;
+    VkDeviceMemory vertexBufferMemory1;
+    VkBuffer indexBuffer1;
+    VkDeviceMemory indexBufferMemory1;
+
+    // std::vector<VkBuffer> uniformBuffers;
+    std::array<std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT>, 2> uniformBuffers{};
+    // std::vector<VkDeviceMemory> uniformBuffersMemory;
+    std::array<std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT>, 2> uniformBuffersMemory{};
+    // std::vector<void*> uniformBuffersMapped;
+    std::array<std::array<void*, MAX_FRAMES_IN_FLIGHT>, 2> uniformBuffersMapped{};
 
     VkDescriptorPool descriptorPool;
-    std::vector<VkDescriptorSet> descriptorSets;
+    // std::vector<VkDescriptorSet> descriptorSets;
+    std::array<std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT>, 2> descriptorSets{};
 
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -249,6 +337,11 @@ private:
     }
 
     void cleanupSwapChain() {
+        for (auto semaphore : renderFinishedSemaphores) {
+            vkDestroySemaphore(device, semaphore, nullptr);
+        }
+        renderFinishedSemaphores.clear();
+
         vkDestroyImageView(device, depthImageView, nullptr);
         vkDestroyImage(device, depthImage, nullptr);
         vkFreeMemory(device, depthImageMemory, nullptr);
@@ -271,9 +364,12 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
 
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            vkDestroyBuffer(device, uniformBuffers[i], nullptr);
-            vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
+        for (size_t mesh = 0; mesh < 2; ++mesh) {
+            for (size_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; ++frame) {
+                vkUnmapMemory(device, uniformBuffersMemory[mesh][frame]);
+                vkDestroyBuffer(device, uniformBuffers[mesh][frame], nullptr);
+                vkFreeMemory(device, uniformBuffersMemory[mesh][frame], nullptr);
+            }
         }
 
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
@@ -286,14 +382,17 @@ private:
 
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-        vkDestroyBuffer(device, indexBuffer, nullptr);
-        vkFreeMemory(device, indexBufferMemory, nullptr);
+        vkDestroyBuffer(device, indexBuffer0, nullptr);
+        vkFreeMemory(device, indexBufferMemory0, nullptr);
+        vkDestroyBuffer(device, vertexBuffer0, nullptr);
+        vkFreeMemory(device, vertexBufferMemory0, nullptr);
 
-        vkDestroyBuffer(device, vertexBuffer, nullptr);
-        vkFreeMemory(device, vertexBufferMemory, nullptr);
+        vkDestroyBuffer(device, indexBuffer1, nullptr);
+        vkFreeMemory(device, indexBufferMemory1, nullptr);
+        vkDestroyBuffer(device, vertexBuffer1, nullptr);
+        vkFreeMemory(device, vertexBufferMemory1, nullptr);
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
@@ -330,6 +429,7 @@ private:
         createImageViews();
         createDepthResources();
         createFramebuffers();
+        createRenderFinishedSemaphores();
     }
 
     void createInstance() {
@@ -984,122 +1084,135 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
-                // ⚠️ safety fix (VERY important)
+    // Vertext buffer that gets sent to GPU mem
     void createVertexBuffer() {
-        VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-
-        VkBuffer stagingBuffer;
-        VkDeviceMemory stagingBufferMemory;
-        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-        void* data;
-        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-            memcpy(data, vertices.data(), (size_t) bufferSize);
-        vkUnmapMemory(device, stagingBufferMemory);
-
-        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
-
-        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
-
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        vkFreeMemory(device, stagingBufferMemory, nullptr);
+        uploadMeshBuffer(
+            vertices0.data(),
+            sizeof(Vertex) * vertices0.size(),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            vertexBuffer0,
+            vertexBufferMemory0);
+        uploadMeshBuffer(
+            vertices1.data(),
+            sizeof(Vertex) * vertices1.size(),
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            vertexBuffer1,
+            vertexBufferMemory1);
     }
 
+    // Index buffer that gets sent to GPU mem
     void createIndexBuffer() {
-        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
-
-        VkBuffer stagingBuffer;
-        VkDeviceMemory stagingBufferMemory;
-        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-        void* data;
-        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-            memcpy(data, indices.data(), (size_t) bufferSize);
-        vkUnmapMemory(device, stagingBufferMemory);
-
-        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
-
-        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
-
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
-        vkFreeMemory(device, stagingBufferMemory, nullptr);
+        uploadMeshBuffer(
+            indices0.data(),
+            sizeof(indices0[0]) * indices0.size(),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            indexBuffer0,
+            indexBufferMemory0);
+        uploadMeshBuffer(
+            indices1.data(),
+            sizeof(indices1[0]) * indices1.size(),
+            VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            indexBuffer1,
+            indexBufferMemory1);
     }
 
     void createUniformBuffers() {
-        VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+        const VkDeviceSize bytes = sizeof(UniformBufferObject);
 
-        uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
-        uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
-        uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+        for (size_t mesh = 0; mesh < 2; ++mesh) {
+            for (size_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; ++frame) {
+                createBuffer(
+                    bytes,
+                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    uniformBuffers[mesh][frame],
+                    uniformBuffersMemory[mesh][frame]);
 
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffers[i], uniformBuffersMemory[i]);
-
-            vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
+                if (vkMapMemory(
+                        device,
+                        uniformBuffersMemory[mesh][frame],
+                        0, bytes, 0,
+                        &uniformBuffersMapped[mesh][frame]) != VK_SUCCESS) {
+                    throw std::runtime_error("failed to map uniform memory");
+                }
+            }
         }
     }
 
     void createDescriptorPool() {
-        std::array<VkDescriptorPoolSize, 2> poolSizes{};
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
-        poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        const uint32_t setCount = 2 * MAX_FRAMES_IN_FLIGHT;
 
-        VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolInfo.pPoolSizes = poolSizes.data();
-        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        std::array<VkDescriptorPoolSize, 2> sizes{};
+        sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        sizes[0].descriptorCount = setCount;
+        sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sizes[1].descriptorCount = setCount;
 
-        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create descriptor pool!");
+        VkDescriptorPoolCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        info.poolSizeCount = static_cast<uint32_t>(sizes.size());
+        info.pPoolSizes = sizes.data();
+        info.maxSets = setCount;
+
+        if (vkCreateDescriptorPool(device, &info, nullptr, &descriptorPool)
+                != VK_SUCCESS) {
+            throw std::runtime_error("failed to create descriptor pool");
         }
     }
 
     void createDescriptorSets() {
-        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = descriptorPool;
-        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
-        allocInfo.pSetLayouts = layouts.data();
+        std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT> layouts;
+        layouts.fill(descriptorSetLayout);
 
-        descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
-        if (vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
-            throw std::runtime_error("failed to allocate descriptor sets!");
-        }
+        for (size_t mesh = 0; mesh < 2; ++mesh) {
+            VkDescriptorSetAllocateInfo allocation{};
+            allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocation.descriptorPool = descriptorPool;
+            allocation.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+            allocation.pSetLayouts = layouts.data();
 
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            VkDescriptorBufferInfo bufferInfo{};
-            bufferInfo.buffer = uniformBuffers[i];
-            bufferInfo.offset = 0;
-            bufferInfo.range = sizeof(UniformBufferObject);
+            if (vkAllocateDescriptorSets(
+                    device,
+                    &allocation,
+                    descriptorSets[mesh].data()) != VK_SUCCESS) {
+                throw std::runtime_error("failed to allocate descriptor sets");
+            }
 
-            VkDescriptorImageInfo imageInfo{};
-            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo.imageView = textureImageView;
-            imageInfo.sampler = textureSampler;
+            for (size_t frame = 0; frame < MAX_FRAMES_IN_FLIGHT; ++frame) {
+                VkDescriptorBufferInfo buffer{};
+                buffer.buffer = uniformBuffers[mesh][frame];
+                buffer.offset = 0;
+                buffer.range = sizeof(UniformBufferObject);
 
-            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+                VkDescriptorImageInfo image{};
+                image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                image.imageView = textureImageView;
+                image.sampler = textureSampler;
 
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = descriptorSets[i];
-            descriptorWrites[0].dstBinding = 0;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pBufferInfo = &bufferInfo;
+                std::array<VkWriteDescriptorSet, 2> writes{};
 
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = descriptorSets[i];
-            descriptorWrites[1].dstBinding = 1;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pImageInfo = &imageInfo;
+                writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[0].dstSet = descriptorSets[mesh][frame];
+                writes[0].dstBinding = 0;
+                writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                writes[0].descriptorCount = 1;
+                writes[0].pBufferInfo = &buffer;
 
-            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+                writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[1].dstSet = descriptorSets[mesh][frame];
+                writes[1].dstBinding = 1;
+                writes[1].descriptorType =
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[1].descriptorCount = 1;
+                writes[1].pImageInfo = &image;
+
+                vkUpdateDescriptorSets(
+                    device,
+                    static_cast<uint32_t>(writes.size()),
+                    writes.data(),
+                    0, nullptr);
+            }
         }
     }
 
@@ -1239,15 +1352,21 @@ private:
             scissor.extent = swapChainExtent;
             vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            VkBuffer vertexBuffers[] = {vertexBuffer};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
-
-            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+            // VkBuffer vertexBuffers[] = {vertexBuffer};
+            // VkDeviceSize offsets[] = {0};
+            // vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            // vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            // vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+            // vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+            // Each indexed draw consumes this mesh's index entries, not its vertex count.
+            recordMeshDraw(
+                commandBuffer, vertexBuffer0, indexBuffer0,
+                descriptorSets[0][currentFrame],
+                static_cast<uint32_t>(indices0.size()));
+            recordMeshDraw(
+                commandBuffer, vertexBuffer1, indexBuffer1,
+                descriptorSets[1][currentFrame],
+                static_cast<uint32_t>(indices1.size()));
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -1256,10 +1375,24 @@ private:
         }
     }
 
+    // Presentation may outlive a frame fence, so use one semaphore per swapchain image.
+    void createRenderFinishedSemaphores() {
+        renderFinishedSemaphores.resize(swapChainImages.size());
+
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        for (auto& semaphore : renderFinishedSemaphores) {
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &semaphore) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create presentation semaphore!");
+            }
+        }
+    }
+
     void createSyncObjects() {
         imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
         inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+        createRenderFinishedSemaphores();
 
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1270,18 +1403,24 @@ private:
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
-                vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
                 vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
                 throw std::runtime_error("failed to create synchronization objects for a frame!");
             }
         }
     }
 
-    void updateUniformBuffer(uint32_t currentImage, const SceneTransforms& transforms) {
-        memcpy(uniformBuffersMapped[currentImage], &transforms, sizeof(transforms));
+    void updateUniformBuffer(
+        uint32_t meshIndex,
+        uint32_t frameIndex,
+        const SceneTransforms& transforms) {
+
+        memcpy(
+            uniformBuffersMapped[meshIndex][frameIndex],
+            &transforms,
+            sizeof(transforms));
     }
 
-    void drawFrameInternal(const SceneTransforms& transforms) {
+    void drawFrameInternal(const SceneTransforms& transforms0, const SceneTransforms& transforms1) {
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
         uint32_t imageIndex;
@@ -1294,7 +1433,9 @@ private:
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
-        updateUniformBuffer(currentFrame, transforms);
+        // updateUniformBuffer(currentFrame, transforms);
+        updateUniformBuffer(0, currentFrame, transforms0);  // mesh 0
+        updateUniformBuffer(1, currentFrame, transforms1);  // mesh 1
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
@@ -1313,7 +1454,7 @@ private:
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
-        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
+        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[imageIndex]};
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -1555,9 +1696,10 @@ Renderer::Renderer(
     uint32_t width,
     uint32_t height,
     const char* title,
-    const Mesh& mesh,
+    const Mesh& mesh0,
+    const Mesh& mesh1,
     const std::string& texturePath)
-    : impl(std::make_unique<Impl>(width, height, title, mesh, texturePath)) {
+    : impl(std::make_unique<Impl>(width, height, title, mesh0, mesh1, texturePath)) {
 }
 
 Renderer::~Renderer() = default;
@@ -1574,8 +1716,8 @@ float Renderer::aspectRatio() const {
     return impl->aspectRatio();
 }
 
-void Renderer::drawFrame(const SceneTransforms& transforms) {
-    impl->drawFrame(transforms);
+void Renderer::drawFrame(const SceneTransforms& transforms0, const SceneTransforms& transforms1) {
+    impl->drawFrame(transforms0, transforms1);
 }
 
 void* Renderer::nativeWindowHandle() const {

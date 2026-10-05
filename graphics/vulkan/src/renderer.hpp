@@ -42,7 +42,8 @@ public:
         std::uint32_t width,
         std::uint32_t height,
         const char* title,
-        const Mesh& mesh,
+        const Mesh& mesh0,
+        const Mesh& mesh1,
         const std::string& texturePath);
     ~Renderer();
 
@@ -52,7 +53,7 @@ public:
     bool shouldClose() const;
     void pollEvents() const;
     float aspectRatio() const;
-    void drawFrame(const SceneTransforms& transforms);
+    void drawFrame(const SceneTransforms& transforms0, const SceneTransforms& transforms1); // note that view and project are shared, so this is bad on mem cpy 
 
 private:
     friend class CameraController;

@@ -48,32 +48,32 @@ struct VertexHash {
 // 1
 
 
-Mesh makeQuad() {
+Mesh makeQuad(float z_offset) {
     Mesh matthew_quad;  // confused about the memory managment here, is this on the stack or the heap. id guess stack but then idk how we are returning it? i guess that we can return it by just pushing the values onto the stack? can return more than just an interger value? should know this tbh
 
     Vertex matthew_v1{};
-    matthew_v1.position = {-0.5f, -0.5f, 0.0f};         // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v1.position = {-0.5f, -0.5f, z_offset};         // glm::vec3 is 3-component fp32 vector, position = x,y,z
     matthew_v1.color = {1.0f, 0.0f, 0.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v1.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v1);
     matthew_quad.indices.push_back(0);
 
     Vertex matthew_v2{};
-    matthew_v2.position = {-0.5f, 0.5f, 0.0f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v2.position = {-0.5f, 0.5f, z_offset};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
     matthew_v2.color = {0.0f, 1.0f, 0.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v2.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v2);
     matthew_quad.indices.push_back(1);
 
     Vertex matthew_v3{};
-    matthew_v3.position = {0.5f, -0.5f, 0.0f};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v3.position = {0.5f, -0.5f, z_offset};          // glm::vec3 is 3-component fp32 vector, position = x,y,z
     matthew_v3.color = {0.0f, 0.0f, 1.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v3.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v3);
     matthew_quad.indices.push_back(2);
 
     Vertex matthew_v4{};
-    matthew_v4.position = {0.5f, 0.5f, 0.0f};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
+    matthew_v4.position = {0.5f, 0.5f, z_offset};           // glm::vec3 is 3-component fp32 vector, position = x,y,z
     matthew_v4.color = {1.0f, 0.0f, 1.0f};         // glm::vec3 is 3-component fp32 vector, color    = r,g,b
     matthew_v4.textureCoordinate = {0.0f, 0.0f};        // glm::vec2 is 2-component fp32 vector, text coordinates are now the textecure maps to the surface, ignoring for now
     matthew_quad.vertices.push_back(matthew_v4);
@@ -166,7 +166,7 @@ Mesh loadObj(const std::string& path) {
     return mesh;
 }
 
-SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const CameraState& camera) {
+SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const CameraState& camera, int meshNum) {
 
     // Your mesh stores vertex positions. The model, view, and projection matrices transform those positions to determine where the mesh appears on screen.
     // - Model: Places the mesh in the world. Your square might be defined around (0, 0, 0); this matrix can move it somewhere else, rotate it, or resize it.
@@ -181,11 +181,22 @@ SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const Camer
 
     SceneTransforms transforms{};
 
+    if(meshNum == 0){
     transforms.model = glm::rotate(
         glm::mat4(1.0f),                        // identiy matrix 
         timeSeconds * glm::radians(90.0f),      // rotating 90 radians per second 
         glm::vec3(0.0f, 1.0f, 0.0f)             // around the y axis (x,y,z)
     );
+    }
+
+    if(meshNum == 1){
+    transforms.model = glm::rotate(
+        glm::mat4(1.0f),                        // identiy matrix 
+        timeSeconds * glm::radians(45.0f),      // rotating 90 radians per second 
+        glm::vec3(1.0f, 0.0f, 0.0f)             // around the x axis (x,y,z)
+    );
+    }
+
 
     transforms.view = glm::lookAt(
         camera.position,                    // where camera is in the world (x, y, z)
@@ -210,13 +221,15 @@ SceneTransforms makeTransforms(float timeSeconds, float aspectRatio, const Camer
 int main() {
     try {
         // Mesh mesh = loadObj(MODEL_PATH);
-        Mesh mesh = makeQuad();
+        Mesh mesh0 = makeQuad(0.0); // 0.0 z_offset
+        Mesh mesh1 = makeQuad(1.0); // 1.0 z_offset
 
         Renderer renderer(
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             "Vulkan learning renderer",
-            mesh,
+            mesh0,
+            mesh1,
             TEXTURE_PATH);
         
         CameraController camera(
@@ -245,10 +258,17 @@ int main() {
 
             // Draw frame 
             renderer.drawFrame(
-                makeTransforms(
+                makeTransforms(                 // mesh 0's transform 
                     totalSeconds, 
                     renderer.aspectRatio(),
-                    camera.state()
+                    camera.state(),
+                    0
+                ),
+                makeTransforms(                 // mesh 1's transform
+                    totalSeconds, 
+                    renderer.aspectRatio(),
+                    camera.state(),
+                    1
                 )
             );
         }
