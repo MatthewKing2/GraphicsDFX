@@ -1,5 +1,7 @@
 #include "renderer.hpp"
 #include "camera.hpp"
+#include <cmath>
+#include <numbers>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include <tiny_obj_loader.h>
@@ -46,6 +48,116 @@ struct VertexHash {
 // 0
 // 0.5    *          *
 // 1
+
+
+Mesh makeSphere(float radius, float z_offset){
+
+    Mesh matthew_sphere;
+    
+    float pi = (float)(4.0 * std::atan(1.0));
+
+    // 8 verticies center ring: 
+    for(int i = 0; i < 8; i ++){
+        float theta = (i*(360.0 / 8.0))*(pi / 180.0);
+        float x = (float)(radius * std::sin(theta));
+        float y = (float)(radius * std::cos(theta));
+
+        Vertex v_i{};
+        v_i.position = {x, y, z_offset};
+        v_i.color = {0.0, 1.0, 0.0};
+        matthew_sphere.vertices.push_back(v_i);
+    }
+
+    // 8 verticies upper and lower ring: 
+    float phi = (45.0/2); // phase offshift 
+    float smaller_radius = 0.75 * radius; 
+    float rise = 0.5;
+    for(int i = 0; i < 8; i ++){
+        float theta = (i*(360.0 / 8.0) + phi)*(pi / 180.0);
+        float x = (float)(smaller_radius * std::sin(theta));
+        float y = (float)(smaller_radius * std::cos(theta));
+
+        Vertex v_i{};
+        v_i.position = {x, y, z_offset + rise};
+        v_i.color = {1.0, 0.0, 0.0};
+        matthew_sphere.vertices.push_back(v_i);
+    }
+    for(int i = 0; i < 8; i ++){
+        float theta = (i*(360.0 / 8.0) + phi)*(pi / 180.0);
+        float x = (float)(smaller_radius * std::sin(theta));
+        float y = (float)(smaller_radius * std::cos(theta));
+
+        Vertex v_i{};
+        v_i.position = {x, y, z_offset - rise};
+        v_i.color = {1.0, 0.0, 0.0};
+        matthew_sphere.vertices.push_back(v_i);
+    }
+
+
+    // Temp indicies to see if this is working: 
+
+    // Connect middle to upper ring 
+    for(int i = 0; i < 8; i ++){
+        matthew_sphere.indices.push_back(i);        // middle
+        matthew_sphere.indices.push_back(i+8);      // upper
+        matthew_sphere.indices.push_back((i+1)%8);  // middle
+    }
+
+    // Connect upper ring to middle
+    int rotate = 7;
+    for(int i = 0; i < 8; i ++){
+        matthew_sphere.indices.push_back(((i+1+rotate)%8)+8);   // upper
+        matthew_sphere.indices.push_back(i);                    // middle
+        matthew_sphere.indices.push_back(((i+rotate)%8)+8);     // upper
+    }
+
+
+    // Connect middle to lower ring 
+    for(int i = 0; i < 8; i ++){
+        matthew_sphere.indices.push_back((i+1)%8);  // middle
+        matthew_sphere.indices.push_back(i+16);     // lower
+        matthew_sphere.indices.push_back(i);        // middle
+    }
+
+    // Connect lower ring to middle
+    for(int i = 0; i < 8; i ++){
+        matthew_sphere.indices.push_back(((i+rotate)%8)+16);     // lower
+        matthew_sphere.indices.push_back(i);                     // middle
+        matthew_sphere.indices.push_back(((i+1+rotate)%8)+16);   // lower
+    }
+
+
+    // two more verticies for the top and bottom 
+    Vertex v_u{};
+    v_u.position = {0.0, 0.0, z_offset + 2*rise};
+    v_u.color = {0.0, 0.0, 1.0};
+    matthew_sphere.vertices.push_back(v_u);
+    Vertex v_b{};
+    v_b.position = {0.0, 0.0, z_offset - 2*rise};
+    v_b.color = {0.0, 0.0, 1.0};
+    matthew_sphere.vertices.push_back(v_b);
+
+
+    // connect upper ring to top 
+    // Connect upper ring to middle
+    int top_index = 24;
+    int bottom_index = 25;
+    for(int i = 0; i < 8; i ++){
+        matthew_sphere.indices.push_back(((i+rotate)%8)+8);     // upper
+        matthew_sphere.indices.push_back(top_index);            // top
+        matthew_sphere.indices.push_back(((i+1+rotate)%8)+8);   // upper
+    }
+    for(int i = 0; i < 8; i ++){
+        matthew_sphere.indices.push_back(((i+1+rotate)%8)+16);   // lower
+        matthew_sphere.indices.push_back(bottom_index);          // middle
+        matthew_sphere.indices.push_back(((i+rotate)%8)+16);     // lower
+    }
+
+    return matthew_sphere;
+
+}
+
+
 
 
 Mesh makeQuad(float z_offset) {
@@ -207,9 +319,10 @@ int main() {
     try {
         // Mesh mesh = loadObj(MODEL_PATH);
         std::vector<Mesh> meshes{
-            makeQuad(0.0f), // 0.0 z_offset
-            makeQuad(1.0f), // 1.0 z_offset
-            makeQuad(2.0f)  // 2.0 z_offset
+            makeQuad(0.0f),     // 0.0 z_offset
+            makeQuad(1.0f),     // 1.0 z_offset
+            makeQuad(2.0f),     // 2.0 z_offset
+            makeSphere(1.0f, 4.0f)    // 4.0 z_offset
         };
         std::vector<glm::mat4> modelMatrices(meshes.size(), glm::mat4(1.0f));
 
@@ -248,6 +361,7 @@ int main() {
             modelMatrices[0] = makeModelMatrix(totalSeconds, 90.0f, glm::vec3(0.0f, 1.0f, 0.0f));
             modelMatrices[1] = makeModelMatrix(totalSeconds, 45.0f, glm::vec3(1.0f, 0.0f, 0.0f));
             modelMatrices[2] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
+            modelMatrices[3] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
 
             // Compute view/projection once and draw every uploaded mesh.
             const FrameTransforms transforms = makeTransforms(renderer.aspectRatio(), camera.state());
