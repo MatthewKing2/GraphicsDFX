@@ -17,6 +17,16 @@
 #include <string>
 #include <unordered_map>
 
+
+// N body config
+// ######################################## 
+int NUM_SPHERES = 500;
+float STEP_SIZE = 0.001;
+float GRAV_SOFT = 0;        // weakens extreme close encouters
+float GRAV_CONS = 0.000001; // grav constant G
+// ######################################## 
+
+
 namespace {
 
 constexpr uint32_t WINDOW_WIDTH = 800;
@@ -349,6 +359,11 @@ float getRandomFloat(float min_range, float max_range) {
     return distribution(engine);
 }
 
+float acceleration_component(int i, int j, float pos_j, float pos_i, float mass_j){
+    float dist = pos_j - pos_i;
+    return GRAV_CONS * (mass_j*dist) / std::pow(((dist*dist) + (GRAV_SOFT*GRAV_SOFT)), 1.5f);
+}
+
 
 int main() {
     try {
@@ -357,8 +372,6 @@ int main() {
         std::vector<Mesh> meshes;
 
         // ########################################################################
-        int NUM_SPHERES = 3000;
-        float STEP_SIZE = 0.001;
 
         // Create Meshes 
         // -------------------------------------------------------------------
@@ -374,13 +387,19 @@ int main() {
         float Y_POS_MAX =  2;
         float Z_POS_MIN = -2;
         float Z_POS_MAX =  2;
-        float X_VEL_MIN = -0.5;
-        float X_VEL_MAX =  0.5;
-        float Y_VEL_MIN = -0.5;
-        float Y_VEL_MAX =  0.5;
-        float Z_VEL_MIN = -0.5;
-        float Z_VEL_MAX =  0.5;
-        float MASS_MAX  =  1000;
+        float X_VEL_MIN = -0.0;
+        float X_VEL_MAX =  0.0;
+        float Y_VEL_MIN = -0.0;
+        float Y_VEL_MAX =  0.0;
+        float Z_VEL_MIN = -0.0;
+        float Z_VEL_MAX =  0.0;
+        float X_ACL_MIN = -0.0;
+        float X_ACL_MAX =  0.0;
+        float Y_ACL_MIN = -0.0;
+        float Y_ACL_MAX =  0.0;
+        float Z_ACL_MIN = -0.0;
+        float Z_ACL_MAX =  0.0;
+        float MASS_MAX  =  10;
         float MASS_MIN  =  10;
 
         std::vector<float> x_pos; 
@@ -389,6 +408,9 @@ int main() {
         std::vector<float> x_vel; 
         std::vector<float> y_vel; 
         std::vector<float> z_vel; 
+        std::vector<float> x_acl; 
+        std::vector<float> y_acl; 
+        std::vector<float> z_acl; 
         std::vector<float> mass; 
 
         for(int i = 0; i < NUM_SPHERES; i ++){
@@ -398,6 +420,9 @@ int main() {
             x_vel.push_back(getRandomFloat(X_VEL_MIN, X_VEL_MAX));
             y_vel.push_back(getRandomFloat(Y_VEL_MIN, Y_VEL_MAX));
             z_vel.push_back(getRandomFloat(Z_VEL_MIN, Z_VEL_MAX));
+            x_acl.push_back(getRandomFloat(X_ACL_MIN, X_ACL_MAX));
+            y_acl.push_back(getRandomFloat(Y_ACL_MIN, Y_ACL_MAX));
+            z_acl.push_back(getRandomFloat(Z_ACL_MIN, Z_ACL_MAX));
             mass.push_back (getRandomFloat(MASS_MIN,  MASS_MAX));
         }
         // ########################################################################
@@ -435,8 +460,22 @@ int main() {
 
             // Get camera inputs 
             camera.update(deltaSeconds);
+            
+            // Compute updated Star Acceleration and Velocity Vectors
+            for(int i = 0; i < NUM_SPHERES; i ++){
+                for(int j = 0; j < NUM_SPHERES; j ++){
+                    if(i != j){
+                        x_acl[i] += acceleration_component(i, j, x_pos[j], x_pos[i], mass[j]);
+                        y_acl[i] += acceleration_component(i, j, y_pos[j], y_pos[i], mass[j]);
+                        z_acl[i] += acceleration_component(i, j, z_pos[j], z_pos[i], mass[j]);
+                    }
+                }
+                x_vel[i] = x_vel[i] + (STEP_SIZE * x_acl[i]);
+                y_vel[i] = y_vel[i] + (STEP_SIZE * y_acl[i]);
+                z_vel[i] = z_vel[i] + (STEP_SIZE * z_acl[i]);
+            }
 
-            // Star Updates  
+            // Star Updates Position 
             for(int i = 0; i < NUM_SPHERES; i ++){
                 x_pos[i] = x_pos[i] + (STEP_SIZE * x_vel[i]);
                 y_pos[i] = y_pos[i] + (STEP_SIZE * y_vel[i]);
