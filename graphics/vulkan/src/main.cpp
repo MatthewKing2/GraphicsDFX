@@ -22,8 +22,40 @@
 // ######################################## 
 int NUM_SPHERES = 500;
 float STEP_SIZE = 0.001;
-float GRAV_SOFT = 0;        // weakens extreme close encouters
-float GRAV_CONS = 0.000001; // grav constant G
+float GRAV_SOFT = 0.25;     // weakens extreme close encouters
+float GRAV_CONS = 1;        // grav constant G
+
+float X_POS_MIN = -2;
+float X_POS_MAX =  2;
+float Y_POS_MIN = -2;
+float Y_POS_MAX =  2;
+float Z_POS_MIN = -2;
+float Z_POS_MAX =  2;
+float X_VEL_MIN = -0.0;
+float X_VEL_MAX =  0.0;
+float Y_VEL_MIN = -0.0;
+float Y_VEL_MAX =  0.0;
+float Z_VEL_MIN = -0.0;
+float Z_VEL_MAX =  0.0;
+float X_ACL_MIN = -0.0;
+float X_ACL_MAX =  0.0;
+float Y_ACL_MIN = -0.0;
+float Y_ACL_MAX =  0.0;
+float Z_ACL_MIN = -0.0;
+float Z_ACL_MAX =  0.0;
+float MASS_MAX  =  10;
+float MASS_MIN  =  10;
+
+std::vector<float> x_pos; 
+std::vector<float> y_pos; 
+std::vector<float> z_pos; 
+std::vector<float> x_vel; 
+std::vector<float> y_vel; 
+std::vector<float> z_vel; 
+std::vector<float> x_acl; 
+std::vector<float> y_acl; 
+std::vector<float> z_acl; 
+std::vector<float> mass; 
 // ######################################## 
 
 
@@ -359,9 +391,7 @@ float getRandomFloat(float min_range, float max_range) {
     return distribution(engine);
 }
 
-float acceleration_component(int i, int j, float pos_j, float pos_i, float mass_j){
-    float dist = pos_j - pos_i;
-    return GRAV_CONS * (mass_j*dist) / std::pow(((dist*dist) + (GRAV_SOFT*GRAV_SOFT)), 1.5f);
+float acceleration_component(int i, int j){
 }
 
 
@@ -378,40 +408,6 @@ int main() {
         for(int i = 0; i < NUM_SPHERES; i ++){
             meshes.push_back(makeSphere(0.025f, 0.0f));
         }
-
-        // Data structures to hold position, velocity, and mass 
-        // -------------------------------------------------------------------
-        float X_POS_MIN = -2;
-        float X_POS_MAX =  2;
-        float Y_POS_MIN = -2;
-        float Y_POS_MAX =  2;
-        float Z_POS_MIN = -2;
-        float Z_POS_MAX =  2;
-        float X_VEL_MIN = -0.0;
-        float X_VEL_MAX =  0.0;
-        float Y_VEL_MIN = -0.0;
-        float Y_VEL_MAX =  0.0;
-        float Z_VEL_MIN = -0.0;
-        float Z_VEL_MAX =  0.0;
-        float X_ACL_MIN = -0.0;
-        float X_ACL_MAX =  0.0;
-        float Y_ACL_MIN = -0.0;
-        float Y_ACL_MAX =  0.0;
-        float Z_ACL_MIN = -0.0;
-        float Z_ACL_MAX =  0.0;
-        float MASS_MAX  =  10;
-        float MASS_MIN  =  10;
-
-        std::vector<float> x_pos; 
-        std::vector<float> y_pos; 
-        std::vector<float> z_pos; 
-        std::vector<float> x_vel; 
-        std::vector<float> y_vel; 
-        std::vector<float> z_vel; 
-        std::vector<float> x_acl; 
-        std::vector<float> y_acl; 
-        std::vector<float> z_acl; 
-        std::vector<float> mass; 
 
         for(int i = 0; i < NUM_SPHERES; i ++){
             x_pos.push_back(getRandomFloat(X_POS_MIN, X_POS_MAX));
@@ -463,11 +459,20 @@ int main() {
             
             // Compute updated Star Acceleration and Velocity Vectors
             for(int i = 0; i < NUM_SPHERES; i ++){
+                // Reset Accel vector each time step
+                x_acl[i] = 0;
+                y_acl[i] = 0;
+                z_acl[i] = 0;
                 for(int j = 0; j < NUM_SPHERES; j ++){
                     if(i != j){
-                        x_acl[i] += acceleration_component(i, j, x_pos[j], x_pos[i], mass[j]);
-                        y_acl[i] += acceleration_component(i, j, y_pos[j], y_pos[i], mass[j]);
-                        z_acl[i] += acceleration_component(i, j, z_pos[j], z_pos[i], mass[j]);
+                        float dist_x = x_pos[j] - x_pos[i];
+                        float dist_y = y_pos[j] - y_pos[i];
+                        float dist_z = z_pos[j] - z_pos[i];
+                        float dist_total = std::pow(((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z)), 0.5f);
+
+                        x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / dist_total;
+                        y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / dist_total;
+                        z_acl[i] += (GRAV_CONS*mass[j]*dist_z) / dist_total;
                     }
                 }
                 x_vel[i] = x_vel[i] + (STEP_SIZE * x_acl[i]);
