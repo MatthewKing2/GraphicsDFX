@@ -292,6 +292,13 @@ glm::mat4 makeModelMatrixStar(float timeSeconds, float radius, float speed, floa
 }
 
 
+glm::mat4 makeModelMatrixStar2(float x, float y, float z){
+    glm::vec3 translation_vector = glm::vec3(x, y, z);
+    return glm::translate(glm::mat4(1.0f), translation_vector);
+}
+
+
+
 glm::mat4 makeModelMatrix(float timeSeconds, float degreesPerSecond, const glm::vec3& axis) {
     // Per-object math remains here, not in the renderer.
     return glm::rotate(
@@ -336,20 +343,64 @@ int getRandomFromInput(int input_number, int min_range, int max_range) {
     return distribution(engine);
 }
 
+float getRandomFloat(float min_range, float max_range) {
+    static thread_local std::mt19937 engine{std::random_device{}()};
+    std::uniform_real_distribution<float> distribution(min_range, max_range);
+    return distribution(engine);
+}
+
 
 int main() {
     try {
-        // Mesh mesh = loadObj(MODEL_PATH);
-        std::vector<Mesh> meshes{
-            makeQuad(0.0f),     // 0.0 z_offset
-            makeQuad(1.0f),     // 1.0 z_offset
-            makeQuad(2.0f),     // 2.0 z_offset
-        };
 
-        int NUM_SPHERES = 300;
+        // Array to hold all of the meshes
+        std::vector<Mesh> meshes;
+
+        // ########################################################################
+        int NUM_SPHERES = 3000;
+        float STEP_SIZE = 0.001;
+
+        // Create Meshes 
+        // -------------------------------------------------------------------
         for(int i = 0; i < NUM_SPHERES; i ++){
             meshes.push_back(makeSphere(0.025f, 0.0f));
         }
+
+        // Data structures to hold position, velocity, and mass 
+        // -------------------------------------------------------------------
+        float X_POS_MIN = -2;
+        float X_POS_MAX =  2;
+        float Y_POS_MIN = -2;
+        float Y_POS_MAX =  2;
+        float Z_POS_MIN = -2;
+        float Z_POS_MAX =  2;
+        float X_VEL_MIN = -0.5;
+        float X_VEL_MAX =  0.5;
+        float Y_VEL_MIN = -0.5;
+        float Y_VEL_MAX =  0.5;
+        float Z_VEL_MIN = -0.5;
+        float Z_VEL_MAX =  0.5;
+        float MASS_MAX  =  1000;
+        float MASS_MIN  =  10;
+
+        std::vector<float> x_pos; 
+        std::vector<float> y_pos; 
+        std::vector<float> z_pos; 
+        std::vector<float> x_vel; 
+        std::vector<float> y_vel; 
+        std::vector<float> z_vel; 
+        std::vector<float> mass; 
+
+        for(int i = 0; i < NUM_SPHERES; i ++){
+            x_pos.push_back(getRandomFloat(X_POS_MIN, X_POS_MAX));
+            y_pos.push_back(getRandomFloat(Y_POS_MIN, Y_POS_MAX));
+            z_pos.push_back(getRandomFloat(Z_POS_MIN, Z_POS_MAX));
+            x_vel.push_back(getRandomFloat(X_VEL_MIN, X_VEL_MAX));
+            y_vel.push_back(getRandomFloat(Y_VEL_MIN, Y_VEL_MAX));
+            z_vel.push_back(getRandomFloat(Z_VEL_MIN, Z_VEL_MAX));
+            mass.push_back (getRandomFloat(MASS_MIN,  MASS_MAX));
+        }
+        // ########################################################################
 
 
         std::vector<glm::mat4> modelMatrices(meshes.size(), glm::mat4(1.0f));
@@ -385,19 +436,12 @@ int main() {
             // Get camera inputs 
             camera.update(deltaSeconds);
 
-            // Keep the original two rotations. Entry i belongs to meshes[i].
-            modelMatrices[0] = makeModelMatrix(totalSeconds, 90.0f, glm::vec3(0.0f, 1.0f, 0.0f));
-            modelMatrices[1] = makeModelMatrix(totalSeconds, 45.0f, glm::vec3(1.0f, 0.0f, 0.0f));
-            modelMatrices[2] = makeModelMatrix(totalSeconds, 25.0f, glm::vec3(0.0f, 0.0f, 1.0f));
+            // Star Updates  
             for(int i = 0; i < NUM_SPHERES; i ++){
-                // Radius, Speed, Phase Offset, z_offset
-                int radius = getRandomFromInput(i, 1, 1000);
-                int speed = getRandomFromInput(i+7, 10, 1000);
-                int phase_off = getRandomFromInput(i+13, 0, 360);
-                int z_off = getRandomFromInput(i+42, 1, 100);
-
-                glm::mat4 sphere_model_matrix = makeModelMatrixStar(totalSeconds, radius/250.0, ((float)speed/(float)radius), float(phase_off), z_off/100.0);
-                modelMatrices[3+i] = sphere_model_matrix;
+                x_pos[i] = x_pos[i] + (STEP_SIZE * x_vel[i]);
+                y_pos[i] = y_pos[i] + (STEP_SIZE * y_vel[i]);
+                z_pos[i] = z_pos[i] + (STEP_SIZE * z_vel[i]);
+                modelMatrices[i] = makeModelMatrixStar2(x_pos[i], y_pos[i], z_pos[i]);
             }
 
             // Compute view/projection once and draw every uploaded mesh.
