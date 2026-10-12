@@ -445,14 +445,13 @@ int main() {
 
         // Array to hold all of the meshes
         std::vector<Mesh> meshes;
+        Mesh star = makeSphere(0.025f, 0.0f);
+        meshes.push_back(star);
 
         // ########################################################################
 
         // Create Meshes 
         // -------------------------------------------------------------------
-        for(int i = 0; i < NUM_SPHERES; i ++){
-            meshes.push_back(makeSphere(0.025f, 0.0f));
-        }
 
         init_disk();
         // for(int i = 0; i < NUM_SPHERES; i ++){
@@ -470,13 +469,14 @@ int main() {
         // ########################################################################
 
 
-        std::vector<glm::mat4> modelMatrices(meshes.size(), glm::mat4(1.0f));
+        std::vector<glm::mat4> modelMatrices(NUM_SPHERES, glm::mat4(1.0f));
 
         Renderer renderer(
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             "Vulkan learning renderer",
             meshes,
+            NUM_SPHERES,
             TEXTURE_PATH);
         
         CameraController camera(

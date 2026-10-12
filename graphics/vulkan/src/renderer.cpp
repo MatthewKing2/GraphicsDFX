@@ -106,23 +106,29 @@ public:
         uint32_t initialHeight,
         const char* windowTitle,
         const std::vector<Mesh>& meshes,
+        uint32_t maxInstances,
         const std::string& initialTexturePath)
         : width(initialWidth),
-          height(initialHeight),
-          title(windowTitle),
-          texturePath(initialTexturePath) {
-        // Validate before allocating Vulkan resources. An empty scene is allowed.
-        for (const auto& mesh : meshes) {
-            if (mesh.vertices.empty() || mesh.indices.empty()) {
-                throw std::invalid_argument("each mesh must contain vertices and indices");
-            }
-            if (mesh.indices.size() > std::numeric_limits<uint32_t>::max()) {
-                throw std::invalid_argument("mesh has too many indices for an indexed draw");
-            }
-            for (auto index : mesh.indices) {
-                if (index >= mesh.vertices.size()) {
-                    throw std::invalid_argument("mesh index is outside its vertex array");
-                }
+        height(initialHeight),
+        title(windowTitle),
+        texturePath(initialTexturePath),
+        instanceCapacity(maxInstances) {
+
+        if (meshes.size() != 1 || instanceCapacity == 0) {
+            throw std::invalid_argument(
+                "provide one shared mesh and a positive instance capacity");
+        }
+
+        const auto& mesh = meshes[0];
+        if (mesh.vertices.empty() || mesh.indices.empty()) {
+            throw std::invalid_argument("mesh must contain vertices and indices");
+        }
+        if (mesh.indices.size() > std::numeric_limits<uint32_t>::max()) {
+            throw std::invalid_argument("too many mesh indices");
+        }
+        for (auto index : mesh.indices) {
+            if (index >= mesh.vertices.size()) {
+                throw std::invalid_argument("mesh index outside vertex array");
             }
         }
 
@@ -150,8 +156,9 @@ public:
     void drawFrame(
         const FrameTransforms& transforms,
         const std::vector<glm::mat4>& modelMatrices) {
-        if (modelMatrices.size() != gpuMeshes.size()) {
-            throw std::invalid_argument("provide exactly one model matrix per uploaded mesh");
+
+        if (modelMatrices.size() > instanceCapacity) {
+            throw std::invalid_argument("instance count exceeds renderer capacity");
         }
         drawFrameInternal(transforms, modelMatrices);
     }
@@ -206,25 +213,15 @@ public:
         VkCommandBuffer commandBuffer,
         VkBuffer vertices,
         VkBuffer indices,
-        const glm::mat4& model,
+        uint32_t instanceCount,
         uint32_t indexCount) {
 
         const VkDeviceSize offset = 0;
-
-        vkCmdBindVertexBuffers(
-            commandBuffer, 0, 1, &vertices, &offset);
-
-        vkCmdBindIndexBuffer(
-            commandBuffer, indices, 0, VK_INDEX_TYPE_UINT32);
-
-        // Vulkan copies these 64 bytes into the recorded command state.
-        // This draw sees this model, even after a later draw pushes another one.
-        vkCmdPushConstants(
-            commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-            0, sizeof(model), &model);
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertices, &offset);
+        vkCmdBindIndexBuffer(commandBuffer, indices, 0, VK_INDEX_TYPE_UINT32);
 
         vkCmdDrawIndexed(
-            commandBuffer, indexCount, 1, 0, 0, 0);
+            commandBuffer, indexCount, instanceCount, 0, 0, 0);
     }
 
 
@@ -233,6 +230,7 @@ private:
     uint32_t height;
     std::string title;
     std::string texturePath;
+    uint32_t instanceCapacity;
 
     GLFWwindow* window;
 
@@ -284,6 +282,11 @@ private:
         VkBuffer uniformBuffer = VK_NULL_HANDLE;
         VkDeviceMemory uniformMemory = VK_NULL_HANDLE;
         void* mapped = nullptr;
+
+        VkBuffer modelsBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory modelsMemory = VK_NULL_HANDLE;
+        void* modelsMapped = nullptr;
+
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     };
     std::array<FrameResources, MAX_FRAMES_IN_FLIGHT> frames{};
@@ -370,6 +373,9 @@ private:
             vkUnmapMemory(device, frame.uniformMemory);
             vkDestroyBuffer(device, frame.uniformBuffer, nullptr);
             vkFreeMemory(device, frame.uniformMemory, nullptr);
+            vkUnmapMemory(device, frame.modelsMemory);
+            vkDestroyBuffer(device, frame.modelsBuffer, nullptr);
+            vkFreeMemory(device, frame.modelsMemory, nullptr);
         }
 
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
@@ -689,11 +695,22 @@ private:
         VkDescriptorSetLayoutBinding samplerLayoutBinding{};
         samplerLayoutBinding.binding = 1;
         samplerLayoutBinding.descriptorCount = 1;
-        samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        samplerLayoutBinding.pImmutableSamplers = nullptr;
+        samplerLayoutBinding.descriptorType =
+            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        std::array<VkDescriptorSetLayoutBinding, 2> bindings = {uboLayoutBinding, samplerLayoutBinding};
+        VkDescriptorSetLayoutBinding modelsLayoutBinding{};
+        modelsLayoutBinding.binding = 2;
+        modelsLayoutBinding.descriptorCount = 1;
+        modelsLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        modelsLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            uboLayoutBinding,
+            samplerLayoutBinding,
+            modelsLayoutBinding
+        };
+
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -793,17 +810,10 @@ private:
         dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
         dynamicState.pDynamicStates = dynamicStates.data();
 
-        VkPushConstantRange modelRange{};
-        modelRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        modelRange.offset = 0;
-        modelRange.size = sizeof(glm::mat4);
-
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = 1;
         pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
-        pipelineLayoutInfo.pushConstantRangeCount = 1;
-        pipelineLayoutInfo.pPushConstantRanges = &modelRange;
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -1109,17 +1119,43 @@ private:
     }
 
     void createUniformBuffers() {
-        const VkDeviceSize bytes = sizeof(FrameTransforms);
+        const VkDeviceSize modelBytes =
+            VkDeviceSize(instanceCapacity) * sizeof(glm::mat4);
+
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+        if (modelBytes > properties.limits.maxStorageBufferRange) {
+            throw std::runtime_error(
+                "instance buffer exceeds device storage-buffer limit");
+        }
+
         for (auto& frame : frames) {
             createBuffer(
-                bytes,
+                sizeof(FrameTransforms),
                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                frame.uniformBuffer, frame.uniformMemory);
-            if (vkMapMemory(device, frame.uniformMemory, 0, bytes, 0,
-                            &frame.mapped) != VK_SUCCESS) {
-                throw std::runtime_error("failed to map uniform memory");
+                frame.uniformBuffer,
+                frame.uniformMemory);
+
+            if (vkMapMemory(
+                    device, frame.uniformMemory, 0, sizeof(FrameTransforms),
+                    0, &frame.mapped) != VK_SUCCESS) {
+                throw std::runtime_error("failed to map camera uniform memory");
+            }
+
+            createBuffer(
+                modelBytes,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                frame.modelsBuffer,
+                frame.modelsMemory);
+
+            if (vkMapMemory(
+                    device, frame.modelsMemory, 0, modelBytes,
+                    0, &frame.modelsMapped) != VK_SUCCESS) {
+                throw std::runtime_error("failed to map model storage memory");
             }
         }
     }
@@ -1127,11 +1163,13 @@ private:
     void createDescriptorPool() {
         const uint32_t setCount = MAX_FRAMES_IN_FLIGHT;
 
-        std::array<VkDescriptorPoolSize, 2> sizes{};
+        std::array<VkDescriptorPoolSize, 3> sizes{};
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = setCount;
         sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         sizes[1].descriptorCount = setCount;
+        sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sizes[2].descriptorCount = setCount;
 
         VkDescriptorPoolCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1163,17 +1201,22 @@ private:
             auto& frame = frames[i];
             frame.descriptorSet = sets[i];
 
-            VkDescriptorBufferInfo buffer{};
-            buffer.buffer = frame.uniformBuffer;
-            buffer.offset = 0;
-            buffer.range = sizeof(FrameTransforms);
+            VkDescriptorBufferInfo models{};
+            models.buffer = frame.modelsBuffer;
+            models.offset = 0;
+            models.range = VkDeviceSize(instanceCapacity) * sizeof(glm::mat4);
+            std::array<VkWriteDescriptorSet, 3> writes{};
 
             VkDescriptorImageInfo image{};
             image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             image.imageView = textureImageView;
             image.sampler = textureSampler;
 
-            std::array<VkWriteDescriptorSet, 2> writes{};
+            VkDescriptorBufferInfo buffer{};
+            buffer.buffer = frame.uniformBuffer;
+            buffer.offset = 0;
+            buffer.range = sizeof(FrameTransforms);
+
             writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet = frame.descriptorSet;
             writes[0].dstBinding = 0;
@@ -1187,6 +1230,13 @@ private:
             writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[1].descriptorCount = 1;
             writes[1].pImageInfo = &image;
+
+            writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[2].dstSet = frame.descriptorSet;
+            writes[2].dstBinding = 2;
+            writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[2].descriptorCount = 1;
+            writes[2].pBufferInfo = &models;
 
             vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
                                    writes.data(), 0, nullptr);
@@ -1337,10 +1387,17 @@ private:
             commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
             0, 1, &frames[currentFrame].descriptorSet, 0, nullptr);
 
-        for (size_t i = 0; i < gpuMeshes.size(); ++i) {
-            const auto& mesh = gpuMeshes[i];
-            recordMeshDraw(commandBuffer, mesh.vertexBuffer, mesh.indexBuffer,
-                           modelMatrices[i], mesh.indexCount);
+        const uint32_t instanceCount =
+            static_cast<uint32_t>(modelMatrices.size());
+
+        if (instanceCount != 0) {
+            const auto& mesh = gpuMeshes[0];
+            recordMeshDraw(
+                commandBuffer,
+                mesh.vertexBuffer,
+                mesh.indexBuffer,
+                instanceCount,
+                mesh.indexCount);
         }
 
         vkCmdEndRenderPass(commandBuffer);
@@ -1384,8 +1441,18 @@ private:
         }
     }
 
-    void updateUniformBuffer(uint32_t frameIndex, const FrameTransforms& transforms) {
-        memcpy(frames[frameIndex].mapped, &transforms, sizeof(transforms));
+    void updateFrameData(
+        uint32_t frameIndex,
+        const FrameTransforms& transforms,
+        const std::vector<glm::mat4>& modelMatrices) {
+
+        auto& frame = frames[frameIndex];
+        memcpy(frame.mapped, &transforms, sizeof(transforms));
+
+        const size_t modelBytes = modelMatrices.size() * sizeof(glm::mat4);
+        if (modelBytes != 0) {
+            memcpy(frame.modelsMapped, modelMatrices.data(), modelBytes);
+        }
     }
 
     void drawFrameInternal(
@@ -1404,7 +1471,7 @@ private:
         }
 
         // The fence guarantees this frame slot is no longer being read by the GPU.
-        updateUniformBuffer(currentFrame, transforms);
+        updateFrameData(currentFrame, transforms, modelMatrices);
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
@@ -1666,8 +1733,9 @@ Renderer::Renderer(
     uint32_t height,
     const char* title,
     const std::vector<Mesh>& meshes,
+    uint32_t maxInstances,
     const std::string& texturePath)
-    : impl(std::make_unique<Impl>(width, height, title, meshes, texturePath)) {
+    : impl(std::make_unique<Impl>(width, height, title, meshes, maxInstances, texturePath)) {
 }
 
 Renderer::~Renderer() = default;

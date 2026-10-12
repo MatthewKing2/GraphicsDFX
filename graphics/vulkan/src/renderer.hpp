@@ -44,6 +44,7 @@ public:
         std::uint32_t height,
         const char* title,
         const std::vector<Mesh>& meshes,
+        std::uint32_t maxInstances,
         const std::string& texturePath);
     ~Renderer();
 
@@ -53,8 +54,8 @@ public:
     bool shouldClose() const;
     void pollEvents() const;
     float aspectRatio() const;
-    // modelMatrices[i] transforms meshes[i]; the counts must match exactly.
-    // Only matrices are transferred each frame. No CPU pointers are retained.
+    // All model matrices instance the same uploaded mesh.
+    // The matrix count may range from zero to maxInstances.
     void drawFrame(
         const FrameTransforms& transforms,
         const std::vector<glm::mat4>& modelMatrices);
