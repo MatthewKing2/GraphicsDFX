@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "profiling.hpp"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -138,6 +139,10 @@ public:
 
     ~Impl() {
         vkDeviceWaitIdle(device);
+        if constexpr (profiling::ENABLED) {
+            for (uint32_t i = 0; i < frames.size(); ++i) collectGpuTiming(i);
+            profiling::profiler().finish();
+        }
         cleanup();
     }
 
@@ -288,8 +293,13 @@ private:
         void* modelsMapped = nullptr;
 
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        bool timestampsPending = false;
+        uint64_t profilingFrameId = 0;
     };
     std::array<FrameResources, MAX_FRAMES_IN_FLIGHT> frames{};
+    VkQueryPool timestampPool = VK_NULL_HANDLE;
+    uint32_t timestampValidBits = 0;
+    double timestampPeriodNs = 0.0;
     VkDescriptorPool descriptorPool;
 
     std::vector<VkCommandBuffer> commandBuffers;
@@ -339,6 +349,7 @@ private:
         createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
+        if constexpr (profiling::ENABLED) createProfilingQueries();
     }
 
     void cleanupSwapChain() {
@@ -364,6 +375,9 @@ private:
 
     void cleanup() {
         cleanupSwapChain();
+        if (timestampPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device, timestampPool, nullptr);
+        }
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -573,6 +587,11 @@ private:
         VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
         VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
         VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+        if constexpr (profiling::ENABLED) {
+            std::cout << "[profile] resolution=" << extent.width << 'x' << extent.height
+                      << " presentation=" << (presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO")
+                      << " validation=" << (enableValidationLayers ? "ON" : "OFF") << std::endl;
+        }
 
         uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
         if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
@@ -1350,6 +1369,15 @@ private:
             throw std::runtime_error("failed to begin recording command buffer!");
         }
 
+        if constexpr (profiling::ENABLED) {
+            if (timestampPool != VK_NULL_HANDLE) {
+                const uint32_t firstQuery = currentFrame * 2;
+                vkCmdResetQueryPool(commandBuffer, timestampPool, firstQuery, 2);
+                vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                    timestampPool, firstQuery);
+            }
+        }
+
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
@@ -1402,9 +1430,71 @@ private:
 
         vkCmdEndRenderPass(commandBuffer);
 
+        if constexpr (profiling::ENABLED) {
+            if (timestampPool != VK_NULL_HANDLE) {
+                vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                    timestampPool, currentFrame * 2 + 1);
+            }
+        }
+
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
         }
+    }
+
+    void createProfilingQueries() {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+        uint32_t queueCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueCount, nullptr);
+        std::vector<VkQueueFamilyProperties> queues(queueCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueCount, queues.data());
+        const auto graphicsFamily = findQueueFamilies(physicalDevice).graphicsFamily.value();
+        timestampValidBits = queues[graphicsFamily].timestampValidBits;
+        timestampPeriodNs = properties.limits.timestampPeriod;
+
+        std::cout << "[profile] GPU=" << properties.deviceName
+                  << " timestamp_bits=" << timestampValidBits
+                  << " timestamp_period_ns=" << timestampPeriodNs
+                  << " seed=" << profiling::RANDOM_SEED
+                  << " warmup_frames=" << profiling::WARMUP_FRAMES
+                  << " report_frames=" << profiling::REPORT_FRAMES << std::endl;
+        if (timestampValidBits == 0) {
+            std::cout << "[profile] GPU timestamps unsupported; CPU timers remain enabled.\n";
+            return;
+        }
+
+        VkQueryPoolCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        info.queryCount = MAX_FRAMES_IN_FLIGHT * 2;
+        if (vkCreateQueryPool(device, &info, nullptr, &timestampPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create profiling timestamp pool");
+        }
+    }
+
+    // Called only after this frame slot's fence completes (or device idle at
+    // shutdown). No WAIT_BIT, extra fence, or per-frame device-idle is introduced.
+    void collectGpuTiming(uint32_t frameIndex) {
+        auto& frame = frames[frameIndex];
+        if (timestampPool == VK_NULL_HANDLE || !frame.timestampsPending) return;
+
+        std::array<uint64_t, 2> ticks{};
+        const VkResult result = vkGetQueryPoolResults(
+            device, timestampPool, frameIndex * 2, 2, sizeof(ticks),
+            ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        frame.timestampsPending = false;
+        double renderMs = 0.0;
+        if (result == VK_SUCCESS) {
+            const uint64_t mask = timestampValidBits == 64
+                ? std::numeric_limits<uint64_t>::max()
+                : (uint64_t(1) << timestampValidBits) - 1;
+            const uint64_t elapsedTicks = (ticks[1] - ticks[0]) & mask;
+            renderMs = double(elapsedTicks) * timestampPeriodNs / 1.0e6;
+        } else if (result != VK_NOT_READY) {
+            std::cerr << "[profile] GPU timestamp read failed: " << result << '\n';
+        }
+        profiling::profiler().gpuResult(frame.profilingFrameId, result == VK_SUCCESS, renderMs);
     }
 
     // Presentation may outlive a frame fence, so use one semaphore per swapchain image.
@@ -1446,6 +1536,7 @@ private:
         const FrameTransforms& transforms,
         const std::vector<glm::mat4>& modelMatrices) {
 
+        profiling::ScopedTimer timer(profiling::Stage::MatrixCopy);
         auto& frame = frames[frameIndex];
         memcpy(frame.mapped, &transforms, sizeof(transforms));
 
@@ -1458,10 +1549,23 @@ private:
     void drawFrameInternal(
         const FrameTransforms& transforms,
         const std::vector<glm::mat4>& modelMatrices) {
-        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+        {
+            profiling::ScopedTimer timer(profiling::Stage::FenceWait);
+            if (vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+                throw std::runtime_error("failed to wait for frame fence");
+            }
+        }
+        if constexpr (profiling::ENABLED) {
+            profiling::ScopedTimer timer(profiling::Stage::QueryRead);
+            collectGpuTiming(currentFrame);
+        }
 
         uint32_t imageIndex;
-        VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult result;
+        {
+            profiling::ScopedTimer timer(profiling::Stage::Acquire);
+            result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             recreateSwapChain();
@@ -1473,10 +1577,12 @@ private:
         // The fence guarantees this frame slot is no longer being read by the GPU.
         updateFrameData(currentFrame, transforms, modelMatrices);
 
-        vkResetFences(device, 1, &inFlightFences[currentFrame]);
-
-        vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
-        recordCommandBuffer(commandBuffers[currentFrame], imageIndex, modelMatrices);
+        {
+            profiling::ScopedTimer timer(profiling::Stage::RecordCommands);
+            vkResetFences(device, 1, &inFlightFences[currentFrame]);
+            vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
+            recordCommandBuffer(commandBuffers[currentFrame], imageIndex, modelMatrices);
+        }
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1494,8 +1600,19 @@ private:
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
-        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
-            throw std::runtime_error("failed to submit draw command buffer!");
+        {
+            profiling::ScopedTimer timer(profiling::Stage::Submit);
+            if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to submit draw command buffer!");
+            }
+        }
+        if constexpr (profiling::ENABLED) {
+            if (timestampPool != VK_NULL_HANDLE) {
+                auto& frame = frames[currentFrame];
+                frame.timestampsPending = true;
+                frame.profilingFrameId = profiling::profiler().currentFrameId();
+                profiling::profiler().expectGpu(frame.profilingFrameId);
+            }
         }
 
         VkPresentInfoKHR presentInfo{};
@@ -1510,7 +1627,10 @@ private:
 
         presentInfo.pImageIndices = &imageIndex;
 
-        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+        {
+            profiling::ScopedTimer timer(profiling::Stage::Present);
+            result = vkQueuePresentKHR(presentQueue, &presentInfo);
+        }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
             framebufferResized = false;

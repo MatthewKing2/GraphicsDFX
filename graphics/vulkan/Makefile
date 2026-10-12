@@ -34,5 +34,5 @@ build/vert.spv: shaders/shader.vert
 build/frag.spv: shaders/shader.frag
 	$(GLSLC) $< -o $@
 
-$(OUT): $(SRC) src/renderer.hpp src/camera.hpp
+$(OUT): $(SRC) src/renderer.hpp src/camera.hpp src/profiling.hpp
 	$(CXX) $(SRC) $(CXXFLAGS) $(INCLUDES) $(LIBS) -o $(OUT)

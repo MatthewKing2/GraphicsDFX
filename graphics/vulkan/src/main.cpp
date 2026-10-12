@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "camera.hpp"
+#include "profiling.hpp"
 #include <cmath>
 #include <numbers>
 #include <random>
@@ -388,7 +389,9 @@ int getRandomFromInput(int input_number, int min_range, int max_range) {
 }
 
 float getRandomFloat(float min_range, float max_range) {
-    static thread_local std::mt19937 engine{std::random_device{}()};
+    // Profiling runs repeat the same starting scene; normal runs stay random.
+    static thread_local std::mt19937 engine{
+        profiling::ENABLED ? profiling::RANDOM_SEED : std::random_device{}()};
     std::uniform_real_distribution<float> distribution(min_range, max_range);
     return distribution(engine);
 }
@@ -489,58 +492,70 @@ int main() {
 
         // While 1 forever loop body
         // ########################################################################
-        auto startTime = std::chrono::steady_clock::now();
-        auto previousTime = startTime;
+        auto previousTime = std::chrono::steady_clock::now();
         while (!renderer.shouldClose()) {
-            // No clue tbh
-            renderer.pollEvents();
-            
-            // Update lock
-            const auto now = std::chrono::steady_clock::now();
-            const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
-            const float totalSeconds = std::chrono::duration<float>(now - startTime).count();
-            previousTime = now;
-
-            // Get camera inputs 
-            camera.update(deltaSeconds);
+            if constexpr (profiling::ENABLED) profiling::profiler().beginFrame();
+            {
+                profiling::ScopedTimer timer(profiling::Stage::EventsCamera);
+                renderer.pollEvents();
+                const auto now = std::chrono::steady_clock::now();
+                const float deltaSeconds = std::chrono::duration<float>(now - previousTime).count();
+                previousTime = now;
+                camera.update(deltaSeconds);
+            }
             
             // Compute updated Star Acceleration and Velocity Vectors
-            for(int i = 0; i < NUM_SPHERES; i ++){
-                // Reset Accel vector each time step
-                x_acl[i] = 0;
-                y_acl[i] = 0;
-                z_acl[i] = 0;
-                float i_x_pos = x_pos[i]; // holding i's x,y,z in local vars reduces mem access for each iteration of j
-                float i_y_pos = y_pos[i];
-                float i_z_pos = z_pos[i];
-                for(int j = 0; j < NUM_SPHERES; j ++){
-                    if(i != j){
-                        float dist_x = x_pos[j] - i_x_pos;
-                        float dist_y = y_pos[j] - i_y_pos;
-                        float dist_z = z_pos[j] - i_z_pos;
-                        float soft_dist = std::pow((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z) + (GRAV_SOFT*GRAV_SOFT), 1.5f);
+            {
+                profiling::ScopedTimer timer(profiling::Stage::GravityVelocity);
+                for(int i = 0; i < NUM_SPHERES; i ++){
+                    // Reset Accel vector each time step
+                    x_acl[i] = 0;
+                    y_acl[i] = 0;
+                    z_acl[i] = 0;
+                    float i_x_pos = x_pos[i]; // holding i's x,y,z in local vars reduces mem access for each iteration of j
+                    float i_y_pos = y_pos[i];
+                    float i_z_pos = z_pos[i];
+                    for(int j = 0; j < NUM_SPHERES; j ++){
+                        if(i != j){
+                            float dist_x = x_pos[j] - i_x_pos;
+                            float dist_y = y_pos[j] - i_y_pos;
+                            float dist_z = z_pos[j] - i_z_pos;
+                            float soft_dist = std::pow((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z) + (GRAV_SOFT*GRAV_SOFT), 1.5f);
 
-                        x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / soft_dist;
-                        y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / soft_dist;
-                        z_acl[i] += (GRAV_CONS*mass[j]*dist_z) / soft_dist;
+                            x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / soft_dist;
+                            y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / soft_dist;
+                            z_acl[i] += (GRAV_CONS*mass[j]*dist_z) / soft_dist;
+                        }
                     }
+                    x_vel[i] = x_vel[i] + (STEP_SIZE * x_acl[i]);
+                    y_vel[i] = y_vel[i] + (STEP_SIZE * y_acl[i]);
+                    z_vel[i] = z_vel[i] + (STEP_SIZE * z_acl[i]);
                 }
-                x_vel[i] = x_vel[i] + (STEP_SIZE * x_acl[i]);
-                y_vel[i] = y_vel[i] + (STEP_SIZE * y_acl[i]);
-                z_vel[i] = z_vel[i] + (STEP_SIZE * z_acl[i]);
             }
 
             // Star Updates Position 
-            for(int i = 0; i < NUM_SPHERES; i ++){
-                x_pos[i] = x_pos[i] + (STEP_SIZE * x_vel[i]);
-                y_pos[i] = y_pos[i] + (STEP_SIZE * y_vel[i]);
-                z_pos[i] = z_pos[i] + (STEP_SIZE * z_vel[i]);
-                modelMatrices[i] = makeModelMatrixStar2(x_pos[i], y_pos[i], z_pos[i]);
+            {
+                profiling::ScopedTimer timer(profiling::Stage::PositionModels);
+                for(int i = 0; i < NUM_SPHERES; i ++){
+                    x_pos[i] = x_pos[i] + (STEP_SIZE * x_vel[i]);
+                    y_pos[i] = y_pos[i] + (STEP_SIZE * y_vel[i]);
+                    z_pos[i] = z_pos[i] + (STEP_SIZE * z_vel[i]);
+                    modelMatrices[i] = makeModelMatrixStar2(x_pos[i], y_pos[i], z_pos[i]);
+                }
             }
 
             // Compute view/projection once and draw every uploaded mesh.
-            const FrameTransforms transforms = makeTransforms(renderer.aspectRatio(), camera.state());
+            FrameTransforms transforms;
+            {
+                profiling::ScopedTimer timer(profiling::Stage::CameraMatrices);
+                transforms = makeTransforms(renderer.aspectRatio(), camera.state());
+            }
             renderer.drawFrame(transforms, modelMatrices);
+            if constexpr (profiling::ENABLED) {
+                profiling::profiler().endFrame(
+                    modelMatrices.size(),
+                    modelMatrices.size() * sizeof(glm::mat4) + sizeof(FrameTransforms));
+            }
         }
         // ########################################################################
     } 
