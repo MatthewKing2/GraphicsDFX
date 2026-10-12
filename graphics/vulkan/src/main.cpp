@@ -20,10 +20,11 @@
 
 // N body config
 // ######################################## 
-int NUM_SPHERES = 1000;
-float TOTAL_DISK_MASK = 500.0;
+int NUM_SPHERES = 1500;
+float TOTAL_DISK_MASK = NUM_SPHERES/2;
+float INIT_VELOCITY = 10.0f;
 float STEP_SIZE = 0.001;
-float GRAV_SOFT = 0.05;     // weakens extreme close encouters
+float GRAV_SOFT = 0.75;     // weakens extreme close encouters
 float GRAV_CONS = 1.0;      // grav constant G
 
 float X_POS_MIN = -2;
@@ -407,7 +408,7 @@ void init_disk(){
 
         // Initlize the velocity: 
         // ---------------------------------------------------
-        const float speed = 20.0f * std::pow(radius, 0.5f);
+        const float speed = INIT_VELOCITY * std::pow(radius, 0.5f);
         const float direction = 1.0f; // +1 = counterclockwise, -1 = clockwise
         x_vel.push_back(-direction * speed * std::sin(theta));
         y_vel.push_back( direction * speed * std::cos(theta));
@@ -423,7 +424,7 @@ void init_disk(){
 
     }
 
-    // Put a star with 100x the mass at the center of the galaxy
+    // Put a massive star at the center of the galaxy
     x_pos.push_back(0.0);
     y_pos.push_back(0.0);
     z_pos.push_back(0.0);
@@ -509,13 +510,15 @@ int main() {
                 x_acl[i] = 0;
                 y_acl[i] = 0;
                 z_acl[i] = 0;
+                float i_x_pos = x_pos[i]; // holding i's x,y,z in local vars reduces mem access for each iteration of j
+                float i_y_pos = y_pos[i];
+                float i_z_pos = z_pos[i];
                 for(int j = 0; j < NUM_SPHERES; j ++){
                     if(i != j){
-                        float dist_x = x_pos[j] - x_pos[i];
-                        float dist_y = y_pos[j] - y_pos[i];
-                        float dist_z = z_pos[j] - z_pos[i];
-                        float dist_total = std::pow(((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z)), 0.5f);
-                        float soft_dist = std::pow((dist_total + GRAV_SOFT*GRAV_SOFT), 1.5f);
+                        float dist_x = x_pos[j] - i_x_pos;
+                        float dist_y = y_pos[j] - i_y_pos;
+                        float dist_z = z_pos[j] - i_z_pos;
+                        float soft_dist = std::pow((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z) + (GRAV_SOFT*GRAV_SOFT), 1.5f);
 
                         x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / soft_dist;
                         y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / soft_dist;

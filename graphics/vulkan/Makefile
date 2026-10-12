@@ -1,7 +1,7 @@
 VULKAN_SDK = /c/VulkanSDK/1.4.341.1
 CXX = clang++
 GLSLC = "$(VULKAN_SDK)/Bin/glslc.exe"
-CXXFLAGS = -std=c++17 -Wall
+CXXFLAGS = -std=c++17 -Wall -O3
 
 SRC = src/main.cpp src/renderer.cpp src/camera.cpp
 OUT = build/vulkan_app.exe
