@@ -20,10 +20,11 @@
 
 // N body config
 // ######################################## 
-int NUM_SPHERES = 500;
+int NUM_SPHERES = 1000;
+float TOTAL_DISK_MASK = 500.0;
 float STEP_SIZE = 0.001;
-float GRAV_SOFT = 0.25;     // weakens extreme close encouters
-float GRAV_CONS = 1;        // grav constant G
+float GRAV_SOFT = 0.05;     // weakens extreme close encouters
+float GRAV_CONS = 1.0;      // grav constant G
 
 float X_POS_MIN = -2;
 float X_POS_MAX =  2;
@@ -43,8 +44,8 @@ float Y_ACL_MIN = -0.0;
 float Y_ACL_MAX =  0.0;
 float Z_ACL_MIN = -0.0;
 float Z_ACL_MAX =  0.0;
-float MASS_MAX  =  10;
-float MASS_MIN  =  10;
+float MASS_MAX  =  TOTAL_DISK_MASK/NUM_SPHERES;
+float MASS_MIN  =  TOTAL_DISK_MASK/NUM_SPHERES;
 
 std::vector<float> x_pos; 
 std::vector<float> y_pos; 
@@ -391,7 +392,51 @@ float getRandomFloat(float min_range, float max_range) {
     return distribution(engine);
 }
 
-float acceleration_component(int i, int j){
+void init_disk(){
+    for(int i = 0; i < NUM_SPHERES-1; i ++){
+
+        // Initlize the position: 
+        // ---------------------------------------------------
+        float radius = getRandomFloat(0.2, 4.0);
+        float theta = getRandomFloat(0.0, 2*3.14156);
+        x_pos.push_back(radius * std::cos(theta));
+        y_pos.push_back(radius * std::sin(theta));
+        z_pos.push_back(0.0);
+        // ---------------------------------------------------
+
+
+        // Initlize the velocity: 
+        // ---------------------------------------------------
+        const float speed = 20.0f * std::pow(radius, 0.5f);
+        const float direction = 1.0f; // +1 = counterclockwise, -1 = clockwise
+        x_vel.push_back(-direction * speed * std::sin(theta));
+        y_vel.push_back( direction * speed * std::cos(theta));
+        z_vel.push_back(0.0f);
+
+
+        // Initlize the acceleration and mass: 
+        // ---------------------------------------------------
+        x_acl.push_back(0.0);
+        y_acl.push_back(0.0);
+        z_acl.push_back(0.0);
+        mass.push_back (MASS_MAX);
+
+    }
+
+    // Put a star with 100x the mass at the center of the galaxy
+    x_pos.push_back(0.0);
+    y_pos.push_back(0.0);
+    z_pos.push_back(0.0);
+    x_vel.push_back(0.0);
+    y_vel.push_back(0.0);
+    z_vel.push_back(0.0);
+    x_acl.push_back(0.0);
+    y_acl.push_back(0.0);
+    z_acl.push_back(0.0);
+    mass.push_back (MASS_MAX*1000.0);
+
+
+    return;
 }
 
 
@@ -409,18 +454,19 @@ int main() {
             meshes.push_back(makeSphere(0.025f, 0.0f));
         }
 
-        for(int i = 0; i < NUM_SPHERES; i ++){
-            x_pos.push_back(getRandomFloat(X_POS_MIN, X_POS_MAX));
-            y_pos.push_back(getRandomFloat(Y_POS_MIN, Y_POS_MAX));
-            z_pos.push_back(getRandomFloat(Z_POS_MIN, Z_POS_MAX));
-            x_vel.push_back(getRandomFloat(X_VEL_MIN, X_VEL_MAX));
-            y_vel.push_back(getRandomFloat(Y_VEL_MIN, Y_VEL_MAX));
-            z_vel.push_back(getRandomFloat(Z_VEL_MIN, Z_VEL_MAX));
-            x_acl.push_back(getRandomFloat(X_ACL_MIN, X_ACL_MAX));
-            y_acl.push_back(getRandomFloat(Y_ACL_MIN, Y_ACL_MAX));
-            z_acl.push_back(getRandomFloat(Z_ACL_MIN, Z_ACL_MAX));
-            mass.push_back (getRandomFloat(MASS_MIN,  MASS_MAX));
-        }
+        init_disk();
+        // for(int i = 0; i < NUM_SPHERES; i ++){
+        //     x_pos.push_back(getRandomFloat(X_POS_MIN, X_POS_MAX));
+        //     y_pos.push_back(getRandomFloat(Y_POS_MIN, Y_POS_MAX));
+        //     z_pos.push_back(getRandomFloat(Z_POS_MIN, Z_POS_MAX));
+        //     x_vel.push_back(getRandomFloat(X_VEL_MIN, X_VEL_MAX));
+        //     y_vel.push_back(getRandomFloat(Y_VEL_MIN, Y_VEL_MAX));
+        //     z_vel.push_back(getRandomFloat(Z_VEL_MIN, Z_VEL_MAX));
+        //     x_acl.push_back(getRandomFloat(X_ACL_MIN, X_ACL_MAX));
+        //     y_acl.push_back(getRandomFloat(Y_ACL_MIN, Y_ACL_MAX));
+        //     z_acl.push_back(getRandomFloat(Z_ACL_MIN, Z_ACL_MAX));
+        //     mass.push_back (getRandomFloat(MASS_MIN,  MASS_MAX));
+        // }
         // ########################################################################
 
 
@@ -469,10 +515,11 @@ int main() {
                         float dist_y = y_pos[j] - y_pos[i];
                         float dist_z = z_pos[j] - z_pos[i];
                         float dist_total = std::pow(((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z)), 0.5f);
+                        float soft_dist = std::pow((dist_total + GRAV_SOFT*GRAV_SOFT), 1.5f);
 
-                        x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / dist_total;
-                        y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / dist_total;
-                        z_acl[i] += (GRAV_CONS*mass[j]*dist_z) / dist_total;
+                        x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / soft_dist;
+                        y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / soft_dist;
+                        z_acl[i] += (GRAV_CONS*mass[j]*dist_z) / soft_dist;
                     }
                 }
                 x_vel[i] = x_vel[i] + (STEP_SIZE * x_acl[i]);
