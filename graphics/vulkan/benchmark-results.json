@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-14",
+  "cpu": "Intel Core i7-12700H",
+  "gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU",
+  "method": {
+    "build": "clang++ -O3 -DNDEBUG; validation off only in benchmark binary",
+    "cpu_threads": 1,
+    "benchmark_process_affinity": "logical CPU 0",
+    "resolution": "800x600",
+    "scene": "seed 12345; disk mass 750; central mass 500; same sphere mesh",
+    "theta": 0.5,
+    "softening": 0.75,
+    "frozen_snapshot": true,
+    "tree_rebuilt_every_frame": true,
+    "tree": "balanced Morton-sorted binary spatial hierarchy; monopole Barnes-Hut opening test",
+    "gpu_tree_build": "entirely GPU, including bitonic sort and mass aggregation",
+    "baseline_frames": 60,
+    "baseline_warmup_frames": 10,
+    "limit_confirmation_frames": 30,
+    "fps": "completed render+simulation frame latency, includes presentation and GPU fence completion",
+    "caveats": "Pipeline timestamps include stalls. Laptop clocks vary; limits are measured brackets, not universal maxima. CPU uses single-thread sqrt-based direct forces rather than the earlier pow-based loop. GPU bitonic tree sorting is O(N log^2 N), not an optimized radix sort."
+  },
+  "baseline_n": 1500,
+  "baseline": [
+    {"mode": "cpu-all", "simulation_ms": 8.421630, "build_ms": 0, "force_ms": 8.411157, "integrate_ms": 0.010473, "render_ms": 0.072781, "frame_ms": 9.472048, "fps": 105.573786},
+    {"mode": "cpu-bh", "simulation_ms": 7.479110, "build_ms": 0.112545, "force_ms": 7.357845, "integrate_ms": 0.008720, "render_ms": 0.069234, "frame_ms": 8.463888, "fps": 118.149007},
+    {"mode": "gpu-all", "simulation_ms": 0.452172, "build_ms": 0, "force_and_integrate_ms": 0.452172, "render_ms": 0.061611, "frame_ms": 7.045100, "fps": 141.942627},
+    {"mode": "gpu-bh", "simulation_ms": 0.574372, "build_ms": 0.270215, "force_and_integrate_ms": 0.304157, "render_ms": 0.062106, "frame_ms": 7.953673, "fps": 125.728070}
+  ],
+  "near_5_fps": [
+    {"mode": "cpu-all", "lower_n": 7560, "lower_fps": 5.276656, "upper_n": 7824, "upper_fps": 4.457093},
+    {"mode": "cpu-bh", "lower_n": 13033, "lower_fps": 5.800099, "upper_n": 13504, "upper_fps": 4.878093},
+    {"mode": "gpu-all", "lower_n": 70022, "lower_fps": 5.218054, "upper_n": 72750, "upper_fps": 4.995393},
+    {"mode": "gpu-bh", "lower_n": 176138, "lower_fps": 5.517476, "upper_n": 183000, "upper_fps": 4.996124}
+  ],
+  "gpu_bh_at_183000": {"frame_ms": 200.155177, "force_ms": 182.705334, "build_ms": 10.055757, "render_ms": 5.654460},
+  "accuracy": {"theta": 0.5, "disk_relative_acceleration_rms": 0.00227239, "random_3d_relative_acceleration_rms": 0.00937546, "cpu_gpu_checks": "passed, including theta=0 exact traversal and evolving state", "synchronization_validation_issues": 0},
+  "raw_results_directory": "build/benchmark-20261014-053940-0c83d0"
+}

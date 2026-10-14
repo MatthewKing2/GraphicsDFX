@@ -1,0 +1,49 @@
+#version 450
+layout(local_size_x = 128) in;
+struct Particle { vec4 positionMass; vec4 velocity; };
+struct Node { vec4 centerMass; vec4 boundsMin; vec4 boundsMax; };
+layout(set = 0, binding = 0, std430) readonly buffer Input { Particle particles[]; } input_state;
+layout(set = 0, binding = 1, std430) writeonly buffer Output { Particle particles[]; } output_state;
+layout(set = 0, binding = 2, std430) writeonly buffer Models { mat4 models[]; } instances;
+layout(set = 0, binding = 4, std430) readonly buffer Tree { Node nodes[]; } tree;
+layout(set = 0, binding = 5, std430) readonly buffer Ranks { uint ranks[]; } order;
+layout(push_constant) uniform Parameters {
+    float dt; float softening; float gravity; uint count;
+    float theta; uint leafCount; uint phase; uint offset;
+    uint workCount; uint sortWidth; uint sortStride; uint unused;
+} p;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.count) return;
+    Particle particle = input_state.particles[i];
+    vec3 position = particle.positionMass.xyz, acceleration = vec3(0.0);
+    float rank = float(order.ranks[i]);
+    uint index = 1;
+    while (index != 0) {
+        Node node = tree.nodes[index];
+        bool containsMe = rank >= node.boundsMin.w && rank < node.boundsMin.w + node.boundsMax.w;
+        vec3 dist = node.centerMass.xyz - position;
+        vec3 dimensions = node.boundsMax.xyz - node.boundsMin.xyz;
+        float size = max(dimensions.x, max(dimensions.y, dimensions.z));
+        bool leaf = index >= p.leafCount;
+        bool accept = !containsMe && (leaf || size * size < p.theta * p.theta * dot(dist, dist));
+        if (node.centerMass.w != 0.0 && accept) {
+            float inverse = inversesqrt(dot(dist, dist) + p.softening * p.softening);
+            acceleration += (p.gravity * node.centerMass.w * inverse * inverse * inverse) * dist;
+        }
+        if (node.centerMass.w != 0.0 && !accept && !leaf) index *= 2;
+        else {
+            // Next node after this subtree: climb past right children, then
+            // visit the next right sibling. Bit arithmetic avoids a local stack.
+            uint next = (index + 1) >> uint(findLSB(index + 1));
+            index = next == 1 ? 0 : next;
+        }
+    }
+    vec3 velocity = particle.velocity.xyz + p.dt * acceleration;
+    position += p.dt * velocity;
+    output_state.particles[i].positionMass = vec4(position, particle.positionMass.w);
+    output_state.particles[i].velocity = vec4(velocity, 0.0);
+    mat4 model = mat4(1.0);
+    model[3] = vec4(position, 1.0);
+    instances.models[i] = model;
+}

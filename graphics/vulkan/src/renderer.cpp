@@ -1,5 +1,6 @@
 #include "renderer.hpp"
 #include "profiling.hpp"
+#include "nbody.hpp"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -113,6 +114,19 @@ struct SimulationPushConstants {
 };
 static_assert(sizeof(SimulationPushConstants) == 16, "shader expects 16 bytes of parameters");
 static_assert(offsetof(SimulationPushConstants, NUM_STARS) == 12, "shader parameter offsets must match");
+static_assert(sizeof(BhNode) == 48, "Barnes-Hut shader expects three vec4s");
+struct BhPushConstants {
+    float dt, softening, gravity;
+    uint32_t count;
+    float theta;
+    uint32_t leafCount, phase = 0, offset = 0;
+    uint32_t workCount = 0, sortWidth = 0, sortStride = 0, unused = 0;
+};
+static_assert(sizeof(BhPushConstants) == 48, "Barnes-Hut shader parameter layout");
+using FrameClock = std::chrono::steady_clock;
+static double frameElapsed(FrameClock::time_point start) {
+    return std::chrono::duration<double, std::milli>(FrameClock::now() - start).count();
+}
 
 class Renderer::Impl {
 public:
@@ -122,12 +136,13 @@ public:
         const char* windowTitle,
         const std::vector<Mesh>& meshes,
         const std::vector<gpu_particle>& initialParticles,
-        const std::string& initialTexturePath)
+        const std::string& initialTexturePath,
+        const RendererOptions& rendererOptions)
         : width(initialWidth),
         height(initialHeight),
         title(windowTitle),
         texturePath(initialTexturePath),
-        particleCount(0) {
+        particleCount(0), options(rendererOptions) {
 
         if (meshes.size() != 1 || initialParticles.empty() ||
             initialParticles.size() > std::numeric_limits<uint32_t>::max()) {
@@ -135,6 +150,10 @@ public:
                 "provide one shared mesh and a nonempty particle array");
         }
         particleCount = static_cast<uint32_t>(initialParticles.size());
+        if (particleCount > (1u << 23)) {
+            throw std::invalid_argument("particle count exceeds this demo's tree/index limit");
+        }
+        if (isCpu()) cpuSimulation = std::make_unique<CpuNBody>(initialParticles, isBarnesHut());
         for (const auto& particle : initialParticles) {
             for (int component = 0; component < 4; ++component) {
                 if (!std::isfinite(particle.positionMass[component]) ||
@@ -166,10 +185,8 @@ public:
 
     ~Impl() {
         vkDeviceWaitIdle(device);
-        if constexpr (profiling::ENABLED) {
-            for (uint32_t i = 0; i < frames.size(); ++i) collectGpuTiming(i);
-            profiling::profiler().finish();
-        }
+        if (timingsEnabled()) for (uint32_t i = 0; i < frames.size(); ++i) collectGpuTiming(i);
+        if constexpr (profiling::ENABLED) profiling::profiler().finish();
         cleanup();
     }
 
@@ -191,13 +208,15 @@ public:
 
         if (!std::isfinite(simulation.stepSize) || simulation.stepSize < 0.0f ||
             !std::isfinite(simulation.softening) || simulation.softening <= 0.0f ||
-            !std::isfinite(simulation.gravityConstant) || simulation.gravityConstant < 0.0f) {
+            !std::isfinite(simulation.gravityConstant) || simulation.gravityConstant < 0.0f ||
+            !std::isfinite(simulation.theta) || simulation.theta < 0.0f) {
             throw std::invalid_argument("require finite timestep/gravity >= 0 and softening > 0");
         }
         drawFrameInternal(transforms, simulation);
     }
 
     std::vector<gpu_particle> readParticles() {
+        if (isCpu()) return cpuSimulation->particles();
         // Deliberately blocking: useful for correctness tests, not the frame loop.
         if (vkDeviceWaitIdle(device) != VK_SUCCESS) {
             throw std::runtime_error("failed to wait for particle readback");
@@ -241,6 +260,17 @@ public:
         vkDestroyBuffer(device, staging, nullptr);
         vkFreeMemory(device, memory, nullptr);
         return result;
+    }
+
+    FrameTimings finishFrame() {
+        if (lastSubmittedFrame == std::numeric_limits<uint32_t>::max()) {
+            throw std::runtime_error("no frame has been submitted");
+        }
+        if (vkWaitForFences(device, 1, &inFlightFences[lastSubmittedFrame], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+            throw std::runtime_error("failed to finish benchmark frame");
+        }
+        collectGpuTiming(lastSubmittedFrame);
+        return frames[lastSubmittedFrame].timings;
     }
 
     void* nativeWindowHandle() const {
@@ -311,6 +341,16 @@ private:
     std::string title;
     std::string texturePath;
     uint32_t particleCount;
+    RendererOptions options;
+    std::unique_ptr<CpuNBody> cpuSimulation;
+    uint32_t lastSubmittedFrame = std::numeric_limits<uint32_t>::max();
+    bool isCpu() const {
+        return options.mode == SimulationMode::CpuAllPairs || options.mode == SimulationMode::CpuBarnesHut;
+    }
+    bool isBarnesHut() const {
+        return options.mode == SimulationMode::CpuBarnesHut || options.mode == SimulationMode::GpuBarnesHut;
+    }
+    bool timingsEnabled() const { return options.measureTimings || profiling::ENABLED; }
 
     GLFWwindow* window;
 
@@ -340,6 +380,7 @@ private:
     VkDescriptorPool computeDescriptorPool = VK_NULL_HANDLE;
     VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
     VkPipeline computePipeline = VK_NULL_HANDLE;
+    VkPipeline treeBuildPipeline = VK_NULL_HANDLE;
 
     // Simulation snapshots, NOT frame slots: step t reads one and writes the other.
     struct ParticleBuffer {
@@ -347,6 +388,8 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
     };
     std::array<ParticleBuffer, 2> particleBuffers{};
+    ParticleBuffer sortKeys, treeNodes, sortedRanks;
+    uint32_t leafCount = 1;
     uint32_t currentParticleBuffer = 0;
 
     VkCommandPool commandPool;
@@ -378,11 +421,13 @@ private:
 
         VkBuffer modelsBuffer = VK_NULL_HANDLE;
         VkDeviceMemory modelsMemory = VK_NULL_HANDLE;
+        void* modelsMapped = nullptr; // Only CPU simulation modes map model buffers.
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
         // [0]: A -> B, [1]: B -> A. Both write this frame slot's models buffer.
         std::array<VkDescriptorSet, 2> computeDescriptorSets{};
         bool timestampsPending = false;
         uint64_t profilingFrameId = 0;
+        FrameTimings timings;
     };
     std::array<FrameResources, MAX_FRAMES_IN_FLIGHT> frames{};
     VkQueryPool timestampPool = VK_NULL_HANDLE;
@@ -434,14 +479,16 @@ private:
         createTextureSampler();
         createMeshBuffers(meshes);
         createUniformBuffers();
-        createParticleBuffers(initialParticles);
+        if (!isCpu()) createParticleBuffers(initialParticles);
         createDescriptorPool();
         createDescriptorSets();
-        createComputePipeline();
-        createComputeDescriptorSets();
+        if (!isCpu()) {
+            createComputePipeline();
+            createComputeDescriptorSets();
+        }
         createCommandBuffers();
         createSyncObjects();
-        if constexpr (profiling::ENABLED) createProfilingQueries();
+        if (timingsEnabled()) createProfilingQueries();
     }
 
     void cleanupSwapChain() {
@@ -474,20 +521,30 @@ private:
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyPipeline(device, computePipeline, nullptr);
+        vkDestroyPipeline(device, treeBuildPipeline, nullptr);
         vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
         vkDestroyDescriptorPool(device, computeDescriptorPool, nullptr);
         vkDestroyDescriptorSetLayout(device, computeDescriptorSetLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
 
         for (const auto& particles : particleBuffers) {
-            vkDestroyBuffer(device, particles.buffer, nullptr);
-            vkFreeMemory(device, particles.memory, nullptr);
+            if (particles.buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device, particles.buffer, nullptr);
+                vkFreeMemory(device, particles.memory, nullptr);
+            }
+        }
+        for (const auto& scratch : {sortKeys, treeNodes, sortedRanks}) {
+            if (scratch.buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device, scratch.buffer, nullptr);
+                vkFreeMemory(device, scratch.memory, nullptr);
+            }
         }
 
         for (auto& frame : frames) {
             vkUnmapMemory(device, frame.uniformMemory);
             vkDestroyBuffer(device, frame.uniformBuffer, nullptr);
             vkFreeMemory(device, frame.uniformMemory, nullptr);
+            if (frame.modelsMapped) vkUnmapMemory(device, frame.modelsMemory);
             vkDestroyBuffer(device, frame.modelsBuffer, nullptr);
             vkFreeMemory(device, frame.modelsMemory, nullptr);
         }
@@ -1266,9 +1323,14 @@ private:
             createBuffer(
                 modelBytes,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                isCpu() ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                        : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                 frame.modelsBuffer,
                 frame.modelsMemory);
+            if (isCpu() && vkMapMemory(device, frame.modelsMemory, 0, modelBytes, 0,
+                    &frame.modelsMapped) != VK_SUCCESS) {
+                throw std::runtime_error("failed to map CPU model buffer");
+            }
         }
     }
 
@@ -1315,10 +1377,24 @@ private:
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
             particleBuffers[1].buffer, particleBuffers[1].memory);
+        if (isBarnesHut()) {
+            while (leafCount < particleCount) leafCount *= 2;
+            const VkDeviceSize treeBytes = VkDeviceSize(leafCount) * 2 * sizeof(BhNode);
+            if (treeBytes > properties.limits.maxStorageBufferRange ||
+                properties.limits.maxPerStageDescriptorStorageBuffers < 6) {
+                throw std::runtime_error("Barnes-Hut tree exceeds GPU storage-buffer limits");
+            }
+            createBuffer(VkDeviceSize(leafCount) * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sortKeys.buffer, sortKeys.memory);
+            createBuffer(treeBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, treeNodes.buffer, treeNodes.memory);
+            createBuffer(VkDeviceSize(particleCount) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sortedRanks.buffer, sortedRanks.memory);
+        }
     }
 
     void createComputePipeline() {
-        std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+        std::vector<VkDescriptorSetLayoutBinding> bindings(isBarnesHut() ? 6 : 3);
         for (uint32_t binding = 0; binding < bindings.size(); ++binding) {
             bindings[binding].binding = binding;
             bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -1336,7 +1412,7 @@ private:
 
         VkPushConstantRange parameters{};
         parameters.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        parameters.size = sizeof(SimulationPushConstants);
+        parameters.size = isBarnesHut() ? sizeof(BhPushConstants) : sizeof(SimulationPushConstants);
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.setLayoutCount = 1;
@@ -1348,7 +1424,7 @@ private:
             throw std::runtime_error("failed to create compute pipeline layout");
         }
 
-        const auto code = readFile("build/nbody.spv");
+        const auto code = readFile(isBarnesHut() ? "build/bh_force.spv" : "build/nbody.spv");
         const auto shader = createShaderModule(code);
         VkComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -1363,6 +1439,15 @@ private:
         if (result != VK_SUCCESS) {
             throw std::runtime_error("failed to create compute pipeline");
         }
+        if (isBarnesHut()) {
+            const auto buildCode = readFile("build/bh_build.spv");
+            const auto buildShader = createShaderModule(buildCode);
+            pipelineInfo.stage.module = buildShader;
+            const auto buildResult = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1,
+                &pipelineInfo, nullptr, &treeBuildPipeline);
+            vkDestroyShaderModule(device, buildShader, nullptr);
+            if (buildResult != VK_SUCCESS) throw std::runtime_error("failed to create tree-build pipeline");
+        }
     }
 
     void createComputeDescriptorSets() {
@@ -1370,7 +1455,8 @@ private:
         const uint32_t setCount = MAX_FRAMES_IN_FLIGHT * 2;
         VkDescriptorPoolSize size{};
         size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        size.descriptorCount = setCount * 3;
+        const uint32_t bindingCount = isBarnesHut() ? 6 : 3;
+        size.descriptorCount = setCount * bindingCount;
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.maxSets = setCount;
@@ -1397,14 +1483,19 @@ private:
             for (uint32_t input = 0; input < 2; ++input) {
                 const auto set = sets[frame * 2 + input];
                 frames[frame].computeDescriptorSets[input] = set;
-                std::array<VkDescriptorBufferInfo, 3> buffers{};
+                std::vector<VkDescriptorBufferInfo> buffers(bindingCount);
                 buffers[0] = {particleBuffers[input].buffer, 0,
                     VkDeviceSize(particleCount) * sizeof(gpu_particle)};
                 buffers[1] = {particleBuffers[1 - input].buffer, 0,
                     VkDeviceSize(particleCount) * sizeof(gpu_particle)};
                 buffers[2] = {frames[frame].modelsBuffer, 0,
                     VkDeviceSize(particleCount) * sizeof(glm::mat4)};
-                std::array<VkWriteDescriptorSet, 3> writes{};
+                if (isBarnesHut()) {
+                    buffers[3] = {sortKeys.buffer, 0, VkDeviceSize(leafCount) * 8};
+                    buffers[4] = {treeNodes.buffer, 0, VkDeviceSize(leafCount) * 2 * sizeof(BhNode)};
+                    buffers[5] = {sortedRanks.buffer, 0, VkDeviceSize(particleCount) * 4};
+                }
+                std::vector<VkWriteDescriptorSet> writes(bindingCount);
                 for (uint32_t binding = 0; binding < writes.size(); ++binding) {
                     writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                     writes[binding].dstSet = set;
@@ -1432,20 +1523,65 @@ private:
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &stateDependency,
             0, nullptr, 0, nullptr);
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
         const auto set = frames[currentFrame].computeDescriptorSets[currentParticleBuffer];
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
             computePipelineLayout, 0, 1, &set, 0, nullptr);
-        const SimulationPushConstants parameters = {
-            simulation.stepSize, simulation.softening, simulation.gravityConstant, particleCount};
-        vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
-            0, sizeof(parameters), &parameters);
+        if (isBarnesHut()) {
+            BhPushConstants parameters{simulation.stepSize, simulation.softening,
+                simulation.gravityConstant, particleCount, simulation.theta, leafCount};
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, treeBuildPipeline);
+            // Each phase is separated by a device memory/execution dependency.
+            auto buildPhase = [&](uint32_t phase, uint32_t count, uint32_t offset = 0,
+                                  uint32_t width = 0, uint32_t stride = 0) {
+                parameters.phase = phase; parameters.workCount = count; parameters.offset = offset;
+                parameters.sortWidth = width; parameters.sortStride = stride;
+                vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                    0, sizeof(parameters), &parameters);
+                vkCmdDispatch(commandBuffer, (count - 1) / COMPUTE_WORKGROUP_SIZE + 1, 1, 1);
+                VkMemoryBarrier dependency{};
+                dependency.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                dependency.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &dependency, 0, nullptr, 0, nullptr);
+            };
+            auto reduceLevels = [&]() {
+                for (uint32_t offset = leafCount / 2; offset > 0; offset /= 2) buildPhase(1, offset, offset);
+            };
+            buildPhase(0, leafCount); // Global bounds from unsorted particles.
+            reduceLevels();
+            buildPhase(2, leafCount); // Generate Morton keys.
+            for (uint32_t width = 2; width <= leafCount; width *= 2) {
+                for (uint32_t stride = width / 2; stride > 0; stride /= 2) {
+                    buildPhase(3, leafCount, 0, width, stride);
+                }
+            }
+            buildPhase(4, leafCount); // Sorted leaves and inverse rank lookup.
+            reduceLevels(); // Centers of mass, masses and bounds.
+            if (timingsEnabled() && timestampPool != VK_NULL_HANDLE) {
+                vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    timestampPool, currentFrame * 4 + 1);
+            }
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+            vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(parameters), &parameters);
+        } else {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+            const SimulationPushConstants parameters = {
+                simulation.stepSize, simulation.softening, simulation.gravityConstant, particleCount};
+            vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(parameters), &parameters);
+            if (timingsEnabled() && timestampPool != VK_NULL_HANDLE) {
+                vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    timestampPool, currentFrame * 4 + 1);
+            }
+        }
         vkCmdDispatch(commandBuffer, (particleCount - 1) / COMPUTE_WORKGROUP_SIZE + 1, 1, 1);
 
-        if constexpr (profiling::ENABLED) {
+        if (timingsEnabled()) {
             if (timestampPool != VK_NULL_HANDLE) {
                 vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    timestampPool, currentFrame * 3 + 1);
+                    timestampPool, currentFrame * 4 + 2);
             }
         }
 
@@ -1638,16 +1774,20 @@ private:
             throw std::runtime_error("failed to begin recording command buffer!");
         }
 
-        if constexpr (profiling::ENABLED) {
+        if (timingsEnabled()) {
             if (timestampPool != VK_NULL_HANDLE) {
-                const uint32_t firstQuery = currentFrame * 3;
-                vkCmdResetQueryPool(commandBuffer, timestampPool, firstQuery, 3);
+                const uint32_t firstQuery = currentFrame * 4;
+                vkCmdResetQueryPool(commandBuffer, timestampPool, firstQuery, 4);
                 vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                     timestampPool, firstQuery);
             }
         }
 
-        recordSimulation(commandBuffer, simulation);
+        if (!isCpu()) recordSimulation(commandBuffer, simulation);
+        else if (timingsEnabled() && timestampPool != VK_NULL_HANDLE) {
+            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampPool, currentFrame * 4 + 1);
+            vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampPool, currentFrame * 4 + 2);
+        }
 
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1698,10 +1838,10 @@ private:
 
         vkCmdEndRenderPass(commandBuffer);
 
-        if constexpr (profiling::ENABLED) {
+        if (timingsEnabled()) {
             if (timestampPool != VK_NULL_HANDLE) {
                 vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                    timestampPool, currentFrame * 3 + 2);
+                                    timestampPool, currentFrame * 4 + 3);
             }
         }
 
@@ -1721,7 +1861,7 @@ private:
         timestampValidBits = queues[graphicsFamily].timestampValidBits;
         timestampPeriodNs = properties.limits.timestampPeriod;
 
-        std::cout << "[profile] GPU=" << properties.deviceName
+        if constexpr (profiling::ENABLED) std::cout << "[profile] GPU=" << properties.deviceName
                   << " timestamp_bits=" << timestampValidBits
                   << " timestamp_period_ns=" << timestampPeriodNs
                   << " seed=" << profiling::RANDOM_SEED
@@ -1735,7 +1875,7 @@ private:
         VkQueryPoolCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        info.queryCount = MAX_FRAMES_IN_FLIGHT * 3;
+        info.queryCount = MAX_FRAMES_IN_FLIGHT * 4;
         if (vkCreateQueryPool(device, &info, nullptr, &timestampPool) != VK_SUCCESS) {
             throw std::runtime_error("failed to create profiling timestamp pool");
         }
@@ -1747,9 +1887,9 @@ private:
         auto& frame = frames[frameIndex];
         if (timestampPool == VK_NULL_HANDLE || !frame.timestampsPending) return;
 
-        std::array<uint64_t, 3> ticks{};
+        std::array<uint64_t, 4> ticks{};
         const VkResult result = vkGetQueryPoolResults(
-            device, timestampPool, frameIndex * 3, 3, sizeof(ticks),
+            device, timestampPool, frameIndex * 4, 4, sizeof(ticks),
             ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
         frame.timestampsPending = false;
         double renderMs = 0.0;
@@ -1758,13 +1898,20 @@ private:
             const uint64_t mask = timestampValidBits == 64
                 ? std::numeric_limits<uint64_t>::max()
                 : (uint64_t(1) << timestampValidBits) - 1;
-            computeMs = double((ticks[1] - ticks[0]) & mask) * timestampPeriodNs / 1.0e6;
-            renderMs = double((ticks[2] - ticks[1]) & mask) * timestampPeriodNs / 1.0e6;
+            auto duration = [&](uint32_t first, uint32_t last) {
+                return double((ticks[last] - ticks[first]) & mask) * timestampPeriodNs / 1.0e6;
+            };
+            frame.timings.gpuBuildMs = !isCpu() && isBarnesHut() ? duration(0, 1) : 0.0;
+            frame.timings.gpuForceMs = isCpu() ? 0.0 : duration(1, 2);
+            frame.timings.gpuRenderMs = duration(2, 3);
+            computeMs = frame.timings.gpuBuildMs + frame.timings.gpuForceMs;
+            renderMs = frame.timings.gpuRenderMs;
         } else if (result != VK_NOT_READY) {
             std::cerr << "[profile] GPU timestamp read failed: " << result << '\n';
         }
-        profiling::profiler().gpuResult(frame.profilingFrameId, result == VK_SUCCESS,
-            computeMs, renderMs);
+        if constexpr (profiling::ENABLED) {
+            profiling::profiler().gpuResult(frame.profilingFrameId, result == VK_SUCCESS, computeMs, renderMs);
+        }
     }
 
     // Presentation may outlive a frame fence, so use one semaphore per swapchain image.
@@ -1808,28 +1955,41 @@ private:
         profiling::ScopedTimer timer(profiling::Stage::MatrixCopy);
         auto& frame = frames[frameIndex];
         memcpy(frame.mapped, &transforms, sizeof(transforms));
+        if (isCpu()) {
+            memcpy(frame.modelsMapped, cpuSimulation->models().data(), size_t(particleCount) * sizeof(glm::mat4));
+        }
     }
 
     void drawFrameInternal(
         const FrameTransforms& transforms,
         const SimulationParameters& simulation) {
+        const bool measure = timingsEnabled();
+        auto mark = [&]() { return measure ? FrameClock::now() : FrameClock::time_point{}; };
+        auto since = [&](FrameClock::time_point start) { return measure ? frameElapsed(start) : 0.0; };
+        auto cpuStart = mark();
         {
             profiling::ScopedTimer timer(profiling::Stage::FenceWait);
             if (vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
                 throw std::runtime_error("failed to wait for frame fence");
             }
         }
-        if constexpr (profiling::ENABLED) {
+        const double waitedMs = since(cpuStart);
+        if (timingsEnabled()) {
             profiling::ScopedTimer timer(profiling::Stage::QueryRead);
             collectGpuTiming(currentFrame);
         }
+        auto& timing = frames[currentFrame].timings;
+        timing = FrameTimings{};
+        timing.fenceWaitMs = waitedMs;
 
         uint32_t imageIndex;
         VkResult result;
+        cpuStart = mark();
         {
             profiling::ScopedTimer timer(profiling::Stage::Acquire);
             result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
         }
+        timing.acquireMs = since(cpuStart);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             recreateSwapChain();
@@ -1839,14 +1999,24 @@ private:
         }
 
         // The fence guarantees this frame slot is no longer being read by the GPU.
+        if (isCpu()) {
+            const auto cpu = cpuSimulation->step(simulation, measure);
+            timing.cpuBuildMs = cpu.buildMs;
+            timing.cpuForceMs = cpu.forceMs;
+            timing.cpuIntegrateMs = cpu.integrateMs;
+        }
+        cpuStart = mark();
         updateFrameData(currentFrame, transforms);
+        timing.uploadMs = since(cpuStart);
 
+        cpuStart = mark();
         {
             profiling::ScopedTimer timer(profiling::Stage::RecordCommands);
             vkResetFences(device, 1, &inFlightFences[currentFrame]);
             vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
             recordCommandBuffer(commandBuffers[currentFrame], imageIndex, simulation);
         }
+        timing.recordMs = since(cpuStart);
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1864,20 +2034,25 @@ private:
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
+        cpuStart = mark();
         {
             profiling::ScopedTimer timer(profiling::Stage::Submit);
             if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
                 throw std::runtime_error("failed to submit draw command buffer!");
             }
         }
+        timing.submitMs = since(cpuStart);
         // Advance only after a successful submission (not on skipped acquire frames).
-        currentParticleBuffer = 1 - currentParticleBuffer;
-        if constexpr (profiling::ENABLED) {
+        if (!isCpu()) currentParticleBuffer = 1 - currentParticleBuffer;
+        lastSubmittedFrame = currentFrame;
+        if (timingsEnabled()) {
             if (timestampPool != VK_NULL_HANDLE) {
                 auto& frame = frames[currentFrame];
                 frame.timestampsPending = true;
-                frame.profilingFrameId = profiling::profiler().currentFrameId();
-                profiling::profiler().expectGpu(frame.profilingFrameId);
+                if constexpr (profiling::ENABLED) {
+                    frame.profilingFrameId = profiling::profiler().currentFrameId();
+                    profiling::profiler().expectGpu(frame.profilingFrameId);
+                }
             }
         }
 
@@ -1893,10 +2068,12 @@ private:
 
         presentInfo.pImageIndices = &imageIndex;
 
+        cpuStart = mark();
         {
             profiling::ScopedTimer timer(profiling::Stage::Present);
             result = vkQueuePresentKHR(presentQueue, &presentInfo);
         }
+        timing.presentMs = since(cpuStart);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
             framebufferResized = false;
@@ -1933,6 +2110,10 @@ private:
     }
 
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+        if (options.uncappedPresentation && std::find(availablePresentModes.begin(),
+                availablePresentModes.end(), VK_PRESENT_MODE_IMMEDIATE_KHR) != availablePresentModes.end()) {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
         for (const auto& availablePresentMode : availablePresentModes) {
             if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
                 return availablePresentMode;
@@ -2121,8 +2302,9 @@ Renderer::Renderer(
     const char* title,
     const std::vector<Mesh>& meshes,
     const std::vector<gpu_particle>& initialParticles,
-    const std::string& texturePath)
-    : impl(std::make_unique<Impl>(width, height, title, meshes, initialParticles, texturePath)) {
+    const std::string& texturePath,
+    const RendererOptions& options)
+    : impl(std::make_unique<Impl>(width, height, title, meshes, initialParticles, texturePath, options)) {
 }
 
 Renderer::~Renderer() = default;
@@ -2148,6 +2330,8 @@ void Renderer::drawFrame(
 std::vector<gpu_particle> Renderer::readParticles() {
     return impl->readParticles();
 }
+
+FrameTimings Renderer::finishFrame() { return impl->finishFrame(); }
 
 void* Renderer::nativeWindowHandle() const {
     return impl->nativeWindowHandle();

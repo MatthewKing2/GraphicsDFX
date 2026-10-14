@@ -20,5 +20,12 @@
 !graphics/vulkan/src/camera.cpp
 !graphics/vulkan/src/camera.hpp
 !graphics/vulkan/src/profiling.hpp
+!graphics/vulkan/src/nbody.hpp
+!graphics/vulkan/src/nbody.cpp
+!graphics/vulkan/benchmark-results.json
+!graphics/vulkan/shaders/
+!graphics/vulkan/shaders/bh_build.comp
+!graphics/vulkan/shaders/bh_force.comp
 !graphics/vulkan/tests/
 !graphics/vulkan/tests/nbody_test.cpp
+!graphics/vulkan/tests/benchmark.ps1

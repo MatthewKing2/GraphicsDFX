@@ -17,6 +17,8 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <algorithm>
+#include <iomanip>
 
 
 // N body config
@@ -61,6 +63,7 @@ std::vector<float> z_acl;
 std::vector<float> mass; 
 
 std::vector<gpu_particle> gpu_particle_vector;
+bool benchmarkInitialConditions = false;
 
 // ######################################## 
 
@@ -394,7 +397,7 @@ int getRandomFromInput(int input_number, int min_range, int max_range) {
 float getRandomFloat(float min_range, float max_range) {
     // Profiling runs repeat the same starting scene; normal runs stay random.
     static thread_local std::mt19937 engine{
-        profiling::ENABLED ? profiling::RANDOM_SEED : std::random_device{}()};
+        (profiling::ENABLED || benchmarkInitialConditions) ? profiling::RANDOM_SEED : std::random_device{}()};
     std::uniform_real_distribution<float> distribution(min_range, max_range);
     return distribution(engine);
 }
@@ -423,7 +426,8 @@ void init_disk2(){
     }
 
     // Put a massive star at the center of the galaxy
-    positionMass = glm::vec4(0.0f, 0.0f, 0.0f, MASS_MAX*1000.0);    // position
+    const float centralMass = benchmarkInitialConditions ? 500.0f : MASS_MAX * 1000.0f;
+    positionMass = glm::vec4(0.0f, 0.0f, 0.0f, centralMass);
     velocity = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);                   // velocity
     gpu_particle particle = {positionMass, velocity};               // struct
     gpu_particle_vector.push_back(particle);                        // push
@@ -480,8 +484,46 @@ void init_disk(){
 }
 
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        RendererOptions options;
+        std::string modeName = "gpu-all";
+        bool benchmark = false, freeze = true;
+        int measuredFrames = 30, warmupFrames = 5;
+        float theta = 0.5f;
+        for (int arg = 1; arg < argc; ++arg) {
+            const std::string flag = argv[arg];
+            auto value = [&]() -> std::string {
+                if (++arg >= argc) throw std::invalid_argument("missing value for " + flag);
+                return argv[arg];
+            };
+            if (flag == "--mode") modeName = value();
+            else if (flag == "--particles") NUM_SPHERES = std::stoi(value());
+            else if (flag == "--theta") theta = std::stof(value());
+            else if (flag == "--frames") measuredFrames = std::stoi(value());
+            else if (flag == "--warmup") warmupFrames = std::stoi(value());
+            else if (flag == "--benchmark") benchmark = true;
+            else if (flag == "--evolve") freeze = false;
+            else if (flag == "--help") {
+                std::cout << "--mode cpu-all|cpu-bh|gpu-all|gpu-bh --particles N --theta 0.5\n"
+                          << "--benchmark [--frames 30 --warmup 5 --evolve]\n"
+                          << "Benchmarks freeze positions by default, but still compute all forces,\n"
+                          << "rebuild the tree every step, integrate and render the same sphere mesh.\n";
+                return 0;
+            } else throw std::invalid_argument("unknown option: " + flag);
+        }
+        if (modeName == "cpu-all") options.mode = SimulationMode::CpuAllPairs;
+        else if (modeName == "cpu-bh") options.mode = SimulationMode::CpuBarnesHut;
+        else if (modeName == "gpu-all") options.mode = SimulationMode::GpuAllPairs;
+        else if (modeName == "gpu-bh") options.mode = SimulationMode::GpuBarnesHut;
+        else throw std::invalid_argument("invalid simulation mode");
+        if (NUM_SPHERES < 1 || NUM_SPHERES > (1 << 23) || measuredFrames < 1 || measuredFrames > 100000 ||
+            warmupFrames < 0 || warmupFrames > 100000 ||
+            !std::isfinite(theta) || theta < 0.0f) throw std::invalid_argument("invalid benchmark parameters");
+        options.measureTimings = benchmark;
+        options.uncappedPresentation = benchmark;
+        benchmarkInitialConditions = benchmark;
+        if (benchmark) MASS_MAX = 750.0f / std::max(1, NUM_SPHERES - 1);
 
         // Array to hold all of the meshes
         std::vector<Mesh> meshes;
@@ -498,8 +540,9 @@ int main() {
 
 
         // CPU chooses the initial conditions and physics parameters.
-        // GPU owns the evolving particle state and generates the model matrices.
-        const SimulationParameters simulation = {STEP_SIZE, GRAV_SOFT, GRAV_CONS};
+        // Renderer runs the selected CPU/GPU backend; camera math stays here.
+        const SimulationParameters simulation = {
+            benchmark && freeze ? 0.0f : STEP_SIZE, GRAV_SOFT, GRAV_CONS, theta};
 
         Renderer renderer(
             WINDOW_WIDTH,
@@ -507,13 +550,59 @@ int main() {
             "Vulkan learning renderer",
             meshes,
             gpu_particle_vector,
-            TEXTURE_PATH);
+            TEXTURE_PATH, options);
         
         CameraController camera(
             renderer, 
             glm::vec3(4.0f, 4.0f, 0.0f),        // initial position
             glm::vec3(0.0f, 0.0f, 0.0f)         // initial target
         );
+
+        if (benchmark) {
+            // Completed-frame latency: no accumulating a queue of unfinished GPU work.
+            // Initial conditions and camera are identical across all four modes.
+            const auto transforms = makeTransforms(renderer.aspectRatio(), camera.state());
+            FrameTimings sums;
+            std::vector<double> frameTimes;
+            double totalMs = 0.0;
+            for (int frame = 0; frame < warmupFrames + measuredFrames; ++frame) {
+                const auto start = std::chrono::steady_clock::now();
+                renderer.pollEvents();
+                renderer.drawFrame(transforms, simulation);
+                const auto t = renderer.finishFrame();
+                const double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (frame < warmupFrames) continue;
+                frameTimes.push_back(ms);
+                totalMs += ms;
+                sums.cpuBuildMs += t.cpuBuildMs; sums.cpuForceMs += t.cpuForceMs;
+                sums.cpuIntegrateMs += t.cpuIntegrateMs; sums.uploadMs += t.uploadMs;
+                sums.recordMs += t.recordMs; sums.fenceWaitMs += t.fenceWaitMs;
+                sums.acquireMs += t.acquireMs; sums.submitMs += t.submitMs; sums.presentMs += t.presentMs;
+                sums.gpuBuildMs += t.gpuBuildMs; sums.gpuForceMs += t.gpuForceMs; sums.gpuRenderMs += t.gpuRenderMs;
+            }
+            std::sort(frameTimes.begin(), frameTimes.end());
+            const size_t p95 = (frameTimes.size() * 95 + 99) / 100 - 1;
+            std::cout << std::fixed << std::setprecision(6)
+                << "{\"mode\":\"" << modeName << "\",\"n\":" << NUM_SPHERES
+                << ",\"theta\":" << theta << ",\"frames\":" << measuredFrames
+                << ",\"frozen\":" << (freeze ? "true" : "false")
+                << ",\"frame_ms\":" << totalMs / measuredFrames
+                << ",\"p95_ms\":" << frameTimes[p95] << ",\"fps\":" << 1000.0 * measuredFrames / totalMs
+                << ",\"cpu_build_ms\":" << sums.cpuBuildMs / measuredFrames
+                << ",\"cpu_force_ms\":" << sums.cpuForceMs / measuredFrames
+                << ",\"cpu_integrate_ms\":" << sums.cpuIntegrateMs / measuredFrames
+                << ",\"upload_ms\":" << sums.uploadMs / measuredFrames
+                << ",\"record_ms\":" << sums.recordMs / measuredFrames
+                << ",\"fence_ms\":" << sums.fenceWaitMs / measuredFrames
+                << ",\"acquire_ms\":" << sums.acquireMs / measuredFrames
+                << ",\"submit_ms\":" << sums.submitMs / measuredFrames
+                << ",\"present_ms\":" << sums.presentMs / measuredFrames
+                << ",\"gpu_build_ms\":" << sums.gpuBuildMs / measuredFrames
+                << ",\"gpu_force_ms\":" << sums.gpuForceMs / measuredFrames
+                << ",\"gpu_render_ms\":" << sums.gpuRenderMs / measuredFrames << "}\n";
+            return 0;
+        }
 
 
         // While 1 forever loop body
@@ -530,7 +619,7 @@ int main() {
                 camera.update(deltaSeconds);
             }
             
-            // CPU computes the camera; drawFrame schedules GPU physics then rendering.
+            // CPU computes the camera; drawFrame runs selected physics then rendering.
             // As before, STEP_SIZE is simulation time per rendered frame, not wall time.
             FrameTransforms transforms;
             {
@@ -540,7 +629,9 @@ int main() {
             renderer.drawFrame(transforms, simulation);
             if constexpr (profiling::ENABLED) {
                 profiling::profiler().endFrame(
-                    gpu_particle_vector.size(), sizeof(FrameTransforms));
+                    gpu_particle_vector.size(), sizeof(FrameTransforms) +
+                    ((options.mode == SimulationMode::CpuAllPairs || options.mode == SimulationMode::CpuBarnesHut)
+                        ? gpu_particle_vector.size() * sizeof(glm::mat4) : 0));
             }
         }
         // ########################################################################

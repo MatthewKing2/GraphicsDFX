@@ -30,7 +30,7 @@ enum class Stage : std::size_t {
 inline constexpr std::size_t STAGE_COUNT = static_cast<std::size_t>(Stage::Count);
 inline constexpr std::array<const char*, STAGE_COUNT> STAGE_NAMES = {
     "events + camera", "view + projection",
-    "frame fence wait", "image acquisition", "camera memcpy", "command recording",
+    "frame fence wait", "image acquisition", "buffer memcpy", "command recording",
     "queue submission", "presentation call", "GPU query readback"
 };
 

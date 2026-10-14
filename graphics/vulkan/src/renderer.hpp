@@ -39,6 +39,22 @@ struct SimulationParameters {
     float stepSize = 0.001f;
     float softening = 0.75f;
     float gravityConstant = 1.0f;
+    float theta = 0.5f; // Barnes-Hut opening angle: smaller is more accurate.
+};
+
+enum class SimulationMode { CpuAllPairs, CpuBarnesHut, GpuAllPairs, GpuBarnesHut };
+
+struct RendererOptions {
+    SimulationMode mode = SimulationMode::GpuAllPairs;
+    bool measureTimings = false;
+    bool uncappedPresentation = false;
+};
+
+struct FrameTimings {
+    double cpuBuildMs = 0, cpuForceMs = 0, cpuIntegrateMs = 0;
+    double uploadMs = 0, recordMs = 0, fenceWaitMs = 0, acquireMs = 0;
+    double submitMs = 0, presentMs = 0;
+    double gpuBuildMs = 0, gpuForceMs = 0, gpuRenderMs = 0;
 };
 
 // The application computes these matrices; the renderer only transfers them.
@@ -49,15 +65,16 @@ struct FrameTransforms {
 
 class Renderer {
 public:
-    // Uploads the shared mesh and initial particles once. Subsequent particle
-    // updates and model-matrix generation happen entirely on the GPU.
+    // Uploads the shared mesh once. The selected backend owns particle updates;
+    // GPU modes upload initial particles once and retain evolving state on GPU.
     Renderer(
         std::uint32_t width,
         std::uint32_t height,
         const char* title,
         const std::vector<Mesh>& meshes,
         const std::vector<gpu_particle>& initialParticles,
-        const std::string& texturePath);
+        const std::string& texturePath,
+        const RendererOptions& options = {});
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -66,7 +83,7 @@ public:
     bool shouldClose() const;
     void pollEvents() const;
     float aspectRatio() const;
-    // One GPU simulation step, then draw all particles using the shared mesh.
+    // One simulation step on the selected backend, then render the shared mesh.
     void drawFrame(
         const FrameTransforms& transforms,
         const SimulationParameters& simulation);
@@ -74,6 +91,10 @@ public:
     // Debug/testing only: waits for the GPU and copies its current state back.
     // The normal rendering loop does not call this.
     std::vector<gpu_particle> readParticles();
+
+    // Benchmark only: wait for the most recently submitted frame, then read its
+    // timestamps. This measures completed frames rather than queued CPU work.
+    FrameTimings finishFrame();
 
 private:
     friend class CameraController;

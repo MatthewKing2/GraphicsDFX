@@ -1,0 +1,71 @@
+#version 450
+layout(local_size_x = 128) in;
+struct Particle { vec4 positionMass; vec4 velocity; };
+struct Node { vec4 centerMass; vec4 boundsMin; vec4 boundsMax; };
+layout(set = 0, binding = 0, std430) readonly buffer State { Particle particles[]; } input_state;
+layout(set = 0, binding = 3, std430) buffer Keys { uvec2 keys[]; } sorted;
+layout(set = 0, binding = 4, std430) buffer Tree { Node nodes[]; } tree;
+layout(set = 0, binding = 5, std430) buffer Ranks { uint ranks[]; } order;
+layout(push_constant) uniform Parameters {
+    float dt; float softening; float gravity; uint count;
+    float theta; uint leafCount; uint phase; uint offset;
+    uint workCount; uint sortWidth; uint sortStride; uint unused;
+} p;
+
+uint spreadBits(uint x) {
+    x = (x | (x << 16)) & 0x030000ffu;
+    x = (x | (x << 8)) & 0x0300f00fu;
+    x = (x | (x << 4)) & 0x030c30c3u;
+    x = (x | (x << 2)) & 0x09249249u;
+    return x;
+}
+bool lessKey(uvec2 a, uvec2 b) { return a.x < b.x || (a.x == b.x && a.y < b.y); }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.workCount) return;
+    if (p.phase == 0 || p.phase == 4) {
+        // Phase 0: unsorted leaves for global bounds. Phase 4: sorted tree leaves.
+        uint particle = p.phase == 0 ? i : sorted.keys[i].y;
+        Node node;
+        if (particle < p.count) {
+            node.centerMass = input_state.particles[particle].positionMass;
+            node.boundsMin = vec4(node.centerMass.xyz, float(i));
+            node.boundsMax = vec4(node.centerMass.xyz, 1.0);
+            if (p.phase == 4) order.ranks[particle] = i;
+        } else {
+            node.centerMass = vec4(0.0);
+            node.boundsMin = vec4(vec3(3.402823466e38), float(i));
+            node.boundsMax = vec4(vec3(-3.402823466e38), 1.0);
+        }
+        tree.nodes[p.leafCount + i] = node;
+    } else if (p.phase == 1) {
+        // One dispatch per level: all children are complete before their parents.
+        uint index = p.offset + i;
+        Node a = tree.nodes[2 * index], b = tree.nodes[2 * index + 1];
+        float mass = a.centerMass.w + b.centerMass.w;
+        vec3 center = mass > 0.0 ? (a.centerMass.xyz * a.centerMass.w
+            + b.centerMass.xyz * b.centerMass.w) / mass : vec3(0.0);
+        tree.nodes[index].centerMass = vec4(center, mass);
+        tree.nodes[index].boundsMin = vec4(min(a.boundsMin.xyz, b.boundsMin.xyz), a.boundsMin.w);
+        tree.nodes[index].boundsMax = vec4(max(a.boundsMax.xyz, b.boundsMax.xyz), a.boundsMax.w + b.boundsMax.w);
+    } else if (p.phase == 2) {
+        if (i >= p.count) { sorted.keys[i] = uvec2(0xffffffffu); return; }
+        vec3 extent = max(tree.nodes[1].boundsMax.xyz - tree.nodes[1].boundsMin.xyz, vec3(1e-6));
+        vec3 normalized = clamp((input_state.particles[i].positionMass.xyz
+            - tree.nodes[1].boundsMin.xyz) / extent, vec3(0.0), vec3(1.0));
+        uvec3 q = uvec3(normalized * 1023.0);
+        uint code = spreadBits(q.x) | (spreadBits(q.y) << 1) | (spreadBits(q.z) << 2);
+        sorted.keys[i] = uvec2(code, i);
+    } else if (p.phase == 3) {
+        // Bitonic sorting network. Only one invocation writes each disjoint pair.
+        uint partner = i ^ p.sortStride;
+        if (partner <= i) return;
+        uvec2 a = sorted.keys[i], b = sorted.keys[partner];
+        bool ascending = (i & p.sortWidth) == 0;
+        if (ascending ? lessKey(b, a) : lessKey(a, b)) {
+            sorted.keys[i] = b;
+            sorted.keys[partner] = a;
+        }
+    }
+}
