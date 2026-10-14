@@ -59,6 +59,14 @@ std::vector<float> x_acl;
 std::vector<float> y_acl; 
 std::vector<float> z_acl; 
 std::vector<float> mass; 
+
+struct gpu_particle {
+    glm::vec4 positionMass; // x, y, z, mass
+    glm::vec4 velocity;     // x, y, z, padding 
+};
+
+std::vector<gpu_particle> gpu_particle_vector;
+
 // ######################################## 
 
 
@@ -395,6 +403,37 @@ float getRandomFloat(float min_range, float max_range) {
     std::uniform_real_distribution<float> distribution(min_range, max_range);
     return distribution(engine);
 }
+
+
+void init_disk2(){
+    // Each particle needs Position, Mass, Velocity
+    glm::vec4 positionMass; // x, y, z, mass
+    glm::vec4 velocity;     // x, y, z, padding 
+
+    for(int i = 0; i < NUM_SPHERES-1; i ++){
+        // Init position: 
+        float radius = getRandomFloat(0.2, 4.0);
+        float theta = getRandomFloat(0.0, 2*3.14156);
+        positionMass = glm::vec4(radius*std::cos(theta), radius*std::sin(theta), 0.0f, MASS_MAX);
+
+        // Init velocity: 
+        const float speed = INIT_VELOCITY * std::pow(radius, 0.5f);
+        velocity = glm::vec4(-1.0*speed*std::sin(theta), 1.0*speed*std::cos(theta), 0.0f, 0.0f);
+
+        // Push particle to array 
+        gpu_particle particle = {positionMass, velocity};
+        gpu_particle_vector.push_back(particle);
+    }
+
+    // Put a massive star at the center of the galaxy
+    positionMass = glm::vec4(0.0f, 0.0f, 0.0f, MASS_MAX*1000.0);    // position
+    velocity = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);                   // velocity
+    gpu_particle particle = {positionMass, velocity};               // struct
+    gpu_particle_vector.push_back(particle);                        // push
+
+    return;
+}
+
 
 void init_disk(){
     for(int i = 0; i < NUM_SPHERES-1; i ++){
