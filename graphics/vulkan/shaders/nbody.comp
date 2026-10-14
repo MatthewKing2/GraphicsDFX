@@ -1,0 +1,70 @@
+#version 450
+
+// read only, externely supplied memory 
+layout(set = 0, binding = 0, std140) uniform GravConstants {
+    float STEP_SIZE;
+    float GRAV_SOFT;
+    float GRAV_CONS;
+    uint  NUM_STARS;
+} matthew_grav;
+
+
+
+// This is on a per invocation basis (so for me a per particle basis )
+    // This is all particle positions (b/c need to reference all particles for all paris N body) 
+    // This should match the memory structure i did on the cpp side 
+    // I know my index based on "gl_instanceIndex" and my goal is to updated my velcotiy based on acceleration 
+layout(set = 0, binding = 0, std430) buffer AllParticles {
+    vec4 positionMass []; // x, y, z, mass          array 
+    vec4 velocity     []; // x, y, z, padding       array 
+} matthew_instances;
+
+
+
+
+// See that i dont need any in and out b/c i just read and write to memory 
+// Actually i do need to output my model matrix so that the vector shader can use it 
+    // // Inputs 
+    // layout(location = 0) in vec3 inPosition;
+    // layout(location = 1) in vec3 inColor;
+    // layout(location = 2) in vec2 inTexCoord;
+    // // Outputs 
+    // layout(location = 0) out vec3 fragColor;
+    // layout(location = 1) out vec2 fragTexCoord;
+    layout(location = 0) out mat4 model_matrix;
+
+
+
+
+void main() {
+
+    // Compute my acceleration vector 
+    vec3 my_acceleration = {0, 0, 0};
+    for(uint j = 0; j < matthew_grav.NUM_STARS; j ++){
+        if(j != gl_InstanceIndex){
+           vec4 dist = matthew_instances.positionMass[j] - matthew_instances.positionMass[gl_InstanceIndex];
+           float soft_dist = pow((dist[0]*dist[0]) + (dist[1]*dist[1]) + (dist[2]*dist[2]) + (matthew_grav.GRAV_SOFT*matthew_grav.GRAV_SOFT), 1.5);
+           my_acceleration += (matthew_grav.GRAV_CONS*mass[j]/soft_dist) * dist;
+        }
+    }
+
+    // Update my velocity vector  
+    matthew_instances.velocity[gl_InstanceIndex] += matthew_grav.STEP_SIZE * my_acceleration;
+
+    // Update my position (need some sort of sychronization here so everyone change position after everyones acceleration vector is computed (using old positions)) 
+    float save_mass = matthew_instances.positionMass[gl_InstanceIndex][3];
+    matthew_instances.positionMass[gl_InstanceIndex] += matthew_grav.STEP_SIZE * matthew_instances.velocity[gl_InstanceIndex];
+    matthew_instances.positionMass[gl_InstanceIndex][3] = save_mass;
+
+    // Create my model matrix (my output)
+    model_matrix = mat4(
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        matthew_instances.positionMass[0], 
+        matthew_instances.positionMass[1], 
+        matthew_instances.positionMass[2], 
+        1.0
+    )
+
+}
