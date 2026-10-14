@@ -5,7 +5,7 @@ CXXFLAGS = -std=c++17 -Wall -O3
 
 SRC = src/main.cpp src/renderer.cpp src/camera.cpp
 OUT = build/vulkan_app.exe
-SHADERS = build/vert.spv build/frag.spv
+SHADERS = build/vert.spv build/frag.spv build/nbody.spv
 
 INCLUDES = \
 -I"../glm" \
@@ -22,7 +22,7 @@ LIBS = \
 -lshell32 \
 -lole32
 
-.PHONY: all shaders
+.PHONY: all shaders test
 
 all: shaders $(OUT)
 
@@ -34,5 +34,15 @@ build/vert.spv: shaders/shader.vert
 build/frag.spv: shaders/shader.frag
 	$(GLSLC) $< -o $@
 
+build/nbody.spv: shaders/nbody.comp
+	$(GLSLC) $< -o $@
+
 $(OUT): $(SRC) src/renderer.hpp src/camera.hpp src/profiling.hpp
 	$(CXX) $(SRC) $(CXXFLAGS) $(INCLUDES) $(LIBS) -o $(OUT)
+
+build/nbody_test.exe: tests/nbody_test.cpp src/renderer.cpp src/renderer.hpp src/profiling.hpp
+	$(CXX) tests/nbody_test.cpp src/renderer.cpp $(CXXFLAGS) $(INCLUDES) $(LIBS) -o $@
+
+# Run from this directory so shader/texture paths resolve correctly.
+test: shaders build/nbody_test.exe
+	./build/nbody_test.exe

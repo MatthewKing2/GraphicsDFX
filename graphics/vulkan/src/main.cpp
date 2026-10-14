@@ -60,11 +60,6 @@ std::vector<float> y_acl;
 std::vector<float> z_acl; 
 std::vector<float> mass; 
 
-struct gpu_particle {
-    glm::vec4 positionMass; // x, y, z, mass
-    glm::vec4 velocity;     // x, y, z, padding 
-};
-
 std::vector<gpu_particle> gpu_particle_vector;
 
 // ######################################## 
@@ -406,6 +401,8 @@ float getRandomFloat(float min_range, float max_range) {
 
 
 void init_disk2(){
+    gpu_particle_vector.clear();
+    gpu_particle_vector.reserve(NUM_SPHERES);
     // Each particle needs Position, Mass, Velocity
     glm::vec4 positionMass; // x, y, z, mass
     glm::vec4 velocity;     // x, y, z, padding 
@@ -493,33 +490,23 @@ int main() {
 
         // ########################################################################
 
-        // Create Meshes 
+        // Initialize particles on the CPU, then upload once in Renderer.
         // -------------------------------------------------------------------
 
-        init_disk();
-        // for(int i = 0; i < NUM_SPHERES; i ++){
-        //     x_pos.push_back(getRandomFloat(X_POS_MIN, X_POS_MAX));
-        //     y_pos.push_back(getRandomFloat(Y_POS_MIN, Y_POS_MAX));
-        //     z_pos.push_back(getRandomFloat(Z_POS_MIN, Z_POS_MAX));
-        //     x_vel.push_back(getRandomFloat(X_VEL_MIN, X_VEL_MAX));
-        //     y_vel.push_back(getRandomFloat(Y_VEL_MIN, Y_VEL_MAX));
-        //     z_vel.push_back(getRandomFloat(Z_VEL_MIN, Z_VEL_MAX));
-        //     x_acl.push_back(getRandomFloat(X_ACL_MIN, X_ACL_MAX));
-        //     y_acl.push_back(getRandomFloat(Y_ACL_MIN, Y_ACL_MAX));
-        //     z_acl.push_back(getRandomFloat(Z_ACL_MIN, Z_ACL_MAX));
-        //     mass.push_back (getRandomFloat(MASS_MIN,  MASS_MAX));
-        // }
+        init_disk2();
         // ########################################################################
 
 
-        std::vector<glm::mat4> modelMatrices(NUM_SPHERES, glm::mat4(1.0f));
+        // CPU chooses the initial conditions and physics parameters.
+        // GPU owns the evolving particle state and generates the model matrices.
+        const SimulationParameters simulation = {STEP_SIZE, GRAV_SOFT, GRAV_CONS};
 
         Renderer renderer(
             WINDOW_WIDTH,
             WINDOW_HEIGHT,
             "Vulkan learning renderer",
             meshes,
-            NUM_SPHERES,
+            gpu_particle_vector,
             TEXTURE_PATH);
         
         CameraController camera(
@@ -543,57 +530,17 @@ int main() {
                 camera.update(deltaSeconds);
             }
             
-            // Compute updated Star Acceleration and Velocity Vectors
-            {
-                profiling::ScopedTimer timer(profiling::Stage::GravityVelocity);
-                for(int i = 0; i < NUM_SPHERES; i ++){
-                    // Reset Accel vector each time step
-                    x_acl[i] = 0;
-                    y_acl[i] = 0;
-                    z_acl[i] = 0;
-                    float i_x_pos = x_pos[i]; // holding i's x,y,z in local vars reduces mem access for each iteration of j
-                    float i_y_pos = y_pos[i];
-                    float i_z_pos = z_pos[i];
-                    for(int j = 0; j < NUM_SPHERES; j ++){
-                        if(i != j){
-                            float dist_x = x_pos[j] - i_x_pos;
-                            float dist_y = y_pos[j] - i_y_pos;
-                            float dist_z = z_pos[j] - i_z_pos;
-                            float soft_dist = std::pow((dist_x*dist_x) + (dist_y*dist_y) + (dist_z*dist_z) + (GRAV_SOFT*GRAV_SOFT), 1.5f);
-
-                            x_acl[i] += (GRAV_CONS*mass[j]*dist_x) / soft_dist;
-                            y_acl[i] += (GRAV_CONS*mass[j]*dist_y) / soft_dist;
-                            z_acl[i] += (GRAV_CONS*mass[j]*dist_z) / soft_dist;
-                        }
-                    }
-                    x_vel[i] = x_vel[i] + (STEP_SIZE * x_acl[i]);
-                    y_vel[i] = y_vel[i] + (STEP_SIZE * y_acl[i]);
-                    z_vel[i] = z_vel[i] + (STEP_SIZE * z_acl[i]);
-                }
-            }
-
-            // Star Updates Position 
-            {
-                profiling::ScopedTimer timer(profiling::Stage::PositionModels);
-                for(int i = 0; i < NUM_SPHERES; i ++){
-                    x_pos[i] = x_pos[i] + (STEP_SIZE * x_vel[i]);
-                    y_pos[i] = y_pos[i] + (STEP_SIZE * y_vel[i]);
-                    z_pos[i] = z_pos[i] + (STEP_SIZE * z_vel[i]);
-                    modelMatrices[i] = makeModelMatrixStar2(x_pos[i], y_pos[i], z_pos[i]);
-                }
-            }
-
-            // Compute view/projection once and draw every uploaded mesh.
+            // CPU computes the camera; drawFrame schedules GPU physics then rendering.
+            // As before, STEP_SIZE is simulation time per rendered frame, not wall time.
             FrameTransforms transforms;
             {
                 profiling::ScopedTimer timer(profiling::Stage::CameraMatrices);
                 transforms = makeTransforms(renderer.aspectRatio(), camera.state());
             }
-            renderer.drawFrame(transforms, modelMatrices);
+            renderer.drawFrame(transforms, simulation);
             if constexpr (profiling::ENABLED) {
                 profiling::profiler().endFrame(
-                    modelMatrices.size(),
-                    modelMatrices.size() * sizeof(glm::mat4) + sizeof(FrameTransforms));
+                    gpu_particle_vector.size(), sizeof(FrameTransforms));
             }
         }
         // ########################################################################

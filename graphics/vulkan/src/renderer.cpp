@@ -20,7 +20,9 @@
 #include <array>
 #include <optional>
 #include <set>
+#include <cmath>
 const int MAX_FRAMES_IN_FLIGHT = 2;
+const uint32_t COMPUTE_WORKGROUP_SIZE = 128; // Must match nbody.comp.
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -99,6 +101,18 @@ static std::array<VkVertexInputAttributeDescription, 3> vertexAttributeDescripti
 static_assert(sizeof(glm::mat4) == 64, "shader expects a 64-byte model matrix");
 static_assert(sizeof(FrameTransforms) == 128, "shader expects two packed mat4s");
 static_assert(offsetof(FrameTransforms, projection) == 64, "shader matrix offsets must match");
+static_assert(sizeof(gpu_particle) == 32, "shader expects a 32-byte particle");
+static_assert(offsetof(gpu_particle, velocity) == 16, "shader particle offsets must match");
+
+// Matches the push-constant block in nbody.comp, including field order.
+struct SimulationPushConstants {
+    float STEP_SIZE;
+    float GRAV_SOFT;
+    float GRAV_CONS;
+    uint32_t NUM_STARS;
+};
+static_assert(sizeof(SimulationPushConstants) == 16, "shader expects 16 bytes of parameters");
+static_assert(offsetof(SimulationPushConstants, NUM_STARS) == 12, "shader parameter offsets must match");
 
 class Renderer::Impl {
 public:
@@ -107,17 +121,30 @@ public:
         uint32_t initialHeight,
         const char* windowTitle,
         const std::vector<Mesh>& meshes,
-        uint32_t maxInstances,
+        const std::vector<gpu_particle>& initialParticles,
         const std::string& initialTexturePath)
         : width(initialWidth),
         height(initialHeight),
         title(windowTitle),
         texturePath(initialTexturePath),
-        instanceCapacity(maxInstances) {
+        particleCount(0) {
 
-        if (meshes.size() != 1 || instanceCapacity == 0) {
+        if (meshes.size() != 1 || initialParticles.empty() ||
+            initialParticles.size() > std::numeric_limits<uint32_t>::max()) {
             throw std::invalid_argument(
-                "provide one shared mesh and a positive instance capacity");
+                "provide one shared mesh and a nonempty particle array");
+        }
+        particleCount = static_cast<uint32_t>(initialParticles.size());
+        for (const auto& particle : initialParticles) {
+            for (int component = 0; component < 4; ++component) {
+                if (!std::isfinite(particle.positionMass[component]) ||
+                    !std::isfinite(particle.velocity[component])) {
+                    throw std::invalid_argument("initial particles must be finite");
+                }
+            }
+            if (particle.positionMass.w < 0.0f) {
+                throw std::invalid_argument("particle mass must be nonnegative");
+            }
         }
 
         const auto& mesh = meshes[0];
@@ -134,7 +161,7 @@ public:
         }
 
         initWindow();
-        initVulkan(meshes);
+        initVulkan(meshes, initialParticles);
     }
 
     ~Impl() {
@@ -160,20 +187,68 @@ public:
 
     void drawFrame(
         const FrameTransforms& transforms,
-        const std::vector<glm::mat4>& modelMatrices) {
+        const SimulationParameters& simulation) {
 
-        if (modelMatrices.size() > instanceCapacity) {
-            throw std::invalid_argument("instance count exceeds renderer capacity");
+        if (!std::isfinite(simulation.stepSize) || simulation.stepSize < 0.0f ||
+            !std::isfinite(simulation.softening) || simulation.softening <= 0.0f ||
+            !std::isfinite(simulation.gravityConstant) || simulation.gravityConstant < 0.0f) {
+            throw std::invalid_argument("require finite timestep/gravity >= 0 and softening > 0");
         }
-        drawFrameInternal(transforms, modelMatrices);
+        drawFrameInternal(transforms, simulation);
+    }
+
+    std::vector<gpu_particle> readParticles() {
+        // Deliberately blocking: useful for correctness tests, not the frame loop.
+        if (vkDeviceWaitIdle(device) != VK_SUCCESS) {
+            throw std::runtime_error("failed to wait for particle readback");
+        }
+        const VkDeviceSize bytes = VkDeviceSize(particleCount) * sizeof(gpu_particle);
+        VkBuffer staging;
+        VkDeviceMemory memory;
+        createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            staging, memory);
+
+        auto commandBuffer = beginSingleTimeCommands();
+        VkMemoryBarrier beforeCopy{};
+        beforeCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        beforeCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        beforeCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &beforeCopy, 0, nullptr, 0, nullptr);
+        VkBufferCopy copy{};
+        copy.size = bytes;
+        vkCmdCopyBuffer(commandBuffer, particleBuffers[currentParticleBuffer].buffer,
+            staging, 1, &copy);
+        VkMemoryBarrier afterCopy{};
+        afterCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        afterCopy.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        afterCopy.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &afterCopy, 0, nullptr, 0, nullptr);
+        endSingleTimeCommands(commandBuffer);
+
+        std::vector<gpu_particle> result(particleCount);
+        void* mapped = nullptr;
+        if (vkMapMemory(device, memory, 0, bytes, 0, &mapped) != VK_SUCCESS) {
+            vkDestroyBuffer(device, staging, nullptr);
+            vkFreeMemory(device, memory, nullptr);
+            throw std::runtime_error("failed to map particle readback");
+        }
+        memcpy(result.data(), mapped, static_cast<size_t>(bytes));
+        vkUnmapMemory(device, memory);
+        vkDestroyBuffer(device, staging, nullptr);
+        vkFreeMemory(device, memory, nullptr);
+        return result;
     }
 
     void* nativeWindowHandle() const {
         return window;
     }
 
-    // Upload static geometry through CPU-visible staging memory into device-local memory.
-    void uploadMeshBuffer(
+    // Startup upload through CPU-visible staging into device-local memory.
+    void uploadBuffer(
         const void* source,
         VkDeviceSize bytes,
         VkBufferUsageFlags usage,
@@ -235,7 +310,7 @@ private:
     uint32_t height;
     std::string title;
     std::string texturePath;
-    uint32_t instanceCapacity;
+    uint32_t particleCount;
 
     GLFWwindow* window;
 
@@ -260,6 +335,19 @@ private:
     VkDescriptorSetLayout descriptorSetLayout;
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
+
+    VkDescriptorSetLayout computeDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool computeDescriptorPool = VK_NULL_HANDLE;
+    VkPipelineLayout computePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline computePipeline = VK_NULL_HANDLE;
+
+    // Simulation snapshots, NOT frame slots: step t reads one and writes the other.
+    struct ParticleBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+    };
+    std::array<ParticleBuffer, 2> particleBuffers{};
+    uint32_t currentParticleBuffer = 0;
 
     VkCommandPool commandPool;
 
@@ -290,9 +378,9 @@ private:
 
         VkBuffer modelsBuffer = VK_NULL_HANDLE;
         VkDeviceMemory modelsMemory = VK_NULL_HANDLE;
-        void* modelsMapped = nullptr;
-
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        // [0]: A -> B, [1]: B -> A. Both write this frame slot's models buffer.
+        std::array<VkDescriptorSet, 2> computeDescriptorSets{};
         bool timestampsPending = false;
         uint64_t profilingFrameId = 0;
     };
@@ -326,7 +414,8 @@ private:
         app->framebufferResized = true;
     }
 
-    void initVulkan(const std::vector<Mesh>& meshes) {
+    void initVulkan(const std::vector<Mesh>& meshes,
+                    const std::vector<gpu_particle>& initialParticles) {
         createInstance();
         setupDebugMessenger();
         createSurface();
@@ -345,8 +434,11 @@ private:
         createTextureSampler();
         createMeshBuffers(meshes);
         createUniformBuffers();
+        createParticleBuffers(initialParticles);
         createDescriptorPool();
         createDescriptorSets();
+        createComputePipeline();
+        createComputeDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
         if constexpr (profiling::ENABLED) createProfilingQueries();
@@ -381,13 +473,21 @@ private:
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyPipeline(device, computePipeline, nullptr);
+        vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+        vkDestroyDescriptorPool(device, computeDescriptorPool, nullptr);
+        vkDestroyDescriptorSetLayout(device, computeDescriptorSetLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
+
+        for (const auto& particles : particleBuffers) {
+            vkDestroyBuffer(device, particles.buffer, nullptr);
+            vkFreeMemory(device, particles.memory, nullptr);
+        }
 
         for (auto& frame : frames) {
             vkUnmapMemory(device, frame.uniformMemory);
             vkDestroyBuffer(device, frame.uniformBuffer, nullptr);
             vkFreeMemory(device, frame.uniformMemory, nullptr);
-            vkUnmapMemory(device, frame.modelsMemory);
             vkDestroyBuffer(device, frame.modelsBuffer, nullptr);
             vkFreeMemory(device, frame.modelsMemory, nullptr);
         }
@@ -1124,12 +1224,12 @@ private:
             const auto& source = meshes[i];
             auto& destination = gpuMeshes[i];
             destination.indexCount = static_cast<uint32_t>(source.indices.size());
-            uploadMeshBuffer(
+            uploadBuffer(
                 source.vertices.data(),
                 sizeof(Vertex) * source.vertices.size(),
                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 destination.vertexBuffer, destination.vertexMemory);
-            uploadMeshBuffer(
+            uploadBuffer(
                 source.indices.data(),
                 sizeof(uint32_t) * source.indices.size(),
                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
@@ -1139,7 +1239,7 @@ private:
 
     void createUniformBuffers() {
         const VkDeviceSize modelBytes =
-            VkDeviceSize(instanceCapacity) * sizeof(glm::mat4);
+            VkDeviceSize(particleCount) * sizeof(glm::mat4);
 
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(physicalDevice, &properties);
@@ -1166,16 +1266,9 @@ private:
             createBuffer(
                 modelBytes,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                 frame.modelsBuffer,
                 frame.modelsMemory);
-
-            if (vkMapMemory(
-                    device, frame.modelsMemory, 0, modelBytes,
-                    0, &frame.modelsMapped) != VK_SUCCESS) {
-                throw std::runtime_error("failed to map model storage memory");
-            }
         }
     }
 
@@ -1202,6 +1295,174 @@ private:
         }
     }
 
+    void createParticleBuffers(const std::vector<gpu_particle>& initialParticles) {
+        const VkDeviceSize bytes = VkDeviceSize(particleCount) * sizeof(gpu_particle);
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+        const uint32_t groups = (particleCount - 1) / COMPUTE_WORKGROUP_SIZE + 1;
+        if (bytes > properties.limits.maxStorageBufferRange ||
+            groups > properties.limits.maxComputeWorkGroupCount[0] ||
+            COMPUTE_WORKGROUP_SIZE > properties.limits.maxComputeWorkGroupSize[0] ||
+            COMPUTE_WORKGROUP_SIZE > properties.limits.maxComputeWorkGroupInvocations) {
+            throw std::runtime_error("particle count or workgroup size exceeds GPU limits");
+        }
+
+        // Only A needs initial data. Every element of B is written by the first dispatch.
+        uploadBuffer(initialParticles.data(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            particleBuffers[0].buffer, particleBuffers[0].memory);
+        createBuffer(bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            particleBuffers[1].buffer, particleBuffers[1].memory);
+    }
+
+    void createComputePipeline() {
+        std::array<VkDescriptorSetLayoutBinding, 3> bindings{};
+        for (uint32_t binding = 0; binding < bindings.size(); ++binding) {
+            bindings[binding].binding = binding;
+            bindings[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[binding].descriptorCount = 1;
+            bindings[binding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo descriptorInfo{};
+        descriptorInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        descriptorInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        descriptorInfo.pBindings = bindings.data();
+        if (vkCreateDescriptorSetLayout(device, &descriptorInfo, nullptr,
+                &computeDescriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute descriptor layout");
+        }
+
+        VkPushConstantRange parameters{};
+        parameters.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        parameters.size = sizeof(SimulationPushConstants);
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &computeDescriptorSetLayout;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &parameters;
+        if (vkCreatePipelineLayout(device, &layoutInfo, nullptr,
+                &computePipelineLayout) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute pipeline layout");
+        }
+
+        const auto code = readFile("build/nbody.spv");
+        const auto shader = createShaderModule(code);
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.layout = computePipelineLayout;
+        pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        pipelineInfo.stage.module = shader;
+        pipelineInfo.stage.pName = "main";
+        const auto result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1,
+            &pipelineInfo, nullptr, &computePipeline);
+        vkDestroyShaderModule(device, shader, nullptr);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute pipeline");
+        }
+    }
+
+    void createComputeDescriptorSets() {
+        // Immutable sets for both simulation directions and both frame slots.
+        const uint32_t setCount = MAX_FRAMES_IN_FLIGHT * 2;
+        VkDescriptorPoolSize size{};
+        size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        size.descriptorCount = setCount * 3;
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = setCount;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &size;
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr,
+                &computeDescriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create compute descriptor pool");
+        }
+
+        std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT * 2> layouts{};
+        layouts.fill(computeDescriptorSetLayout);
+        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT * 2> sets{};
+        VkDescriptorSetAllocateInfo allocation{};
+        allocation.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocation.descriptorPool = computeDescriptorPool;
+        allocation.descriptorSetCount = setCount;
+        allocation.pSetLayouts = layouts.data();
+        if (vkAllocateDescriptorSets(device, &allocation, sets.data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate compute descriptor sets");
+        }
+
+        for (uint32_t frame = 0; frame < frames.size(); ++frame) {
+            for (uint32_t input = 0; input < 2; ++input) {
+                const auto set = sets[frame * 2 + input];
+                frames[frame].computeDescriptorSets[input] = set;
+                std::array<VkDescriptorBufferInfo, 3> buffers{};
+                buffers[0] = {particleBuffers[input].buffer, 0,
+                    VkDeviceSize(particleCount) * sizeof(gpu_particle)};
+                buffers[1] = {particleBuffers[1 - input].buffer, 0,
+                    VkDeviceSize(particleCount) * sizeof(gpu_particle)};
+                buffers[2] = {frames[frame].modelsBuffer, 0,
+                    VkDeviceSize(particleCount) * sizeof(glm::mat4)};
+                std::array<VkWriteDescriptorSet, 3> writes{};
+                for (uint32_t binding = 0; binding < writes.size(); ++binding) {
+                    writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    writes[binding].dstSet = set;
+                    writes[binding].dstBinding = binding;
+                    writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    writes[binding].descriptorCount = 1;
+                    writes[binding].pBufferInfo = &buffers[binding];
+                }
+                vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
+                    writes.data(), 0, nullptr);
+            }
+        }
+    }
+
+    void recordSimulation(VkCommandBuffer commandBuffer,
+                          const SimulationParameters& simulation) {
+        // Also covers the startup upload. Serializes particle snapshots between
+        // dispatches: previous writes become visible, and reads finish before reuse.
+        VkMemoryBarrier stateDependency{};
+        stateDependency.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        stateDependency.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        stateDependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &stateDependency,
+            0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
+        const auto set = frames[currentFrame].computeDescriptorSets[currentParticleBuffer];
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+            computePipelineLayout, 0, 1, &set, 0, nullptr);
+        const SimulationPushConstants parameters = {
+            simulation.stepSize, simulation.softening, simulation.gravityConstant, particleCount};
+        vkCmdPushConstants(commandBuffer, computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(parameters), &parameters);
+        vkCmdDispatch(commandBuffer, (particleCount - 1) / COMPUTE_WORKGROUP_SIZE + 1, 1, 1);
+
+        if constexpr (profiling::ENABLED) {
+            if (timestampPool != VK_NULL_HANDLE) {
+                vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    timestampPool, currentFrame * 3 + 1);
+            }
+        }
+
+        // Same model buffer, two consumers: compute writes it, vertex shader reads it.
+        VkBufferMemoryBarrier modelsDependency{};
+        modelsDependency.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        modelsDependency.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        modelsDependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        modelsDependency.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        modelsDependency.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        modelsDependency.buffer = frames[currentFrame].modelsBuffer;
+        modelsDependency.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, 0, 0, nullptr,
+            1, &modelsDependency, 0, nullptr);
+    }
+
     void createDescriptorSets() {
         std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT> layouts;
         layouts.fill(descriptorSetLayout);
@@ -1223,7 +1484,7 @@ private:
             VkDescriptorBufferInfo models{};
             models.buffer = frame.modelsBuffer;
             models.offset = 0;
-            models.range = VkDeviceSize(instanceCapacity) * sizeof(glm::mat4);
+            models.range = VkDeviceSize(particleCount) * sizeof(glm::mat4);
             std::array<VkWriteDescriptorSet, 3> writes{};
 
             VkDescriptorImageInfo image{};
@@ -1296,27 +1557,35 @@ private:
         allocInfo.commandBufferCount = 1;
 
         VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+        if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate upload/readback command buffer");
+        }
 
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+            throw std::runtime_error("failed to begin upload/readback command buffer");
+        }
 
         return commandBuffer;
     }
 
     void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
-        vkEndCommandBuffer(commandBuffer);
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to end upload/readback command buffer");
+        }
 
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffer;
 
-        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(graphicsQueue);
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE) != VK_SUCCESS ||
+            vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS) {
+            throw std::runtime_error("failed to submit upload/readback commands");
+        }
 
         vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
     }
@@ -1361,7 +1630,7 @@ private:
     void recordCommandBuffer(
         VkCommandBuffer commandBuffer,
         uint32_t imageIndex,
-        const std::vector<glm::mat4>& modelMatrices) {
+        const SimulationParameters& simulation) {
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -1371,12 +1640,14 @@ private:
 
         if constexpr (profiling::ENABLED) {
             if (timestampPool != VK_NULL_HANDLE) {
-                const uint32_t firstQuery = currentFrame * 2;
-                vkCmdResetQueryPool(commandBuffer, timestampPool, firstQuery, 2);
+                const uint32_t firstQuery = currentFrame * 3;
+                vkCmdResetQueryPool(commandBuffer, timestampPool, firstQuery, 3);
                 vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                     timestampPool, firstQuery);
             }
         }
+
+        recordSimulation(commandBuffer, simulation);
 
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1415,16 +1686,13 @@ private:
             commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
             0, 1, &frames[currentFrame].descriptorSet, 0, nullptr);
 
-        const uint32_t instanceCount =
-            static_cast<uint32_t>(modelMatrices.size());
-
-        if (instanceCount != 0) {
+        {
             const auto& mesh = gpuMeshes[0];
             recordMeshDraw(
                 commandBuffer,
                 mesh.vertexBuffer,
                 mesh.indexBuffer,
-                instanceCount,
+                particleCount,
                 mesh.indexCount);
         }
 
@@ -1433,7 +1701,7 @@ private:
         if constexpr (profiling::ENABLED) {
             if (timestampPool != VK_NULL_HANDLE) {
                 vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                    timestampPool, currentFrame * 2 + 1);
+                                    timestampPool, currentFrame * 3 + 2);
             }
         }
 
@@ -1467,7 +1735,7 @@ private:
         VkQueryPoolCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        info.queryCount = MAX_FRAMES_IN_FLIGHT * 2;
+        info.queryCount = MAX_FRAMES_IN_FLIGHT * 3;
         if (vkCreateQueryPool(device, &info, nullptr, &timestampPool) != VK_SUCCESS) {
             throw std::runtime_error("failed to create profiling timestamp pool");
         }
@@ -1479,22 +1747,24 @@ private:
         auto& frame = frames[frameIndex];
         if (timestampPool == VK_NULL_HANDLE || !frame.timestampsPending) return;
 
-        std::array<uint64_t, 2> ticks{};
+        std::array<uint64_t, 3> ticks{};
         const VkResult result = vkGetQueryPoolResults(
-            device, timestampPool, frameIndex * 2, 2, sizeof(ticks),
+            device, timestampPool, frameIndex * 3, 3, sizeof(ticks),
             ticks.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
         frame.timestampsPending = false;
         double renderMs = 0.0;
+        double computeMs = 0.0;
         if (result == VK_SUCCESS) {
             const uint64_t mask = timestampValidBits == 64
                 ? std::numeric_limits<uint64_t>::max()
                 : (uint64_t(1) << timestampValidBits) - 1;
-            const uint64_t elapsedTicks = (ticks[1] - ticks[0]) & mask;
-            renderMs = double(elapsedTicks) * timestampPeriodNs / 1.0e6;
+            computeMs = double((ticks[1] - ticks[0]) & mask) * timestampPeriodNs / 1.0e6;
+            renderMs = double((ticks[2] - ticks[1]) & mask) * timestampPeriodNs / 1.0e6;
         } else if (result != VK_NOT_READY) {
             std::cerr << "[profile] GPU timestamp read failed: " << result << '\n';
         }
-        profiling::profiler().gpuResult(frame.profilingFrameId, result == VK_SUCCESS, renderMs);
+        profiling::profiler().gpuResult(frame.profilingFrameId, result == VK_SUCCESS,
+            computeMs, renderMs);
     }
 
     // Presentation may outlive a frame fence, so use one semaphore per swapchain image.
@@ -1533,22 +1803,16 @@ private:
 
     void updateFrameData(
         uint32_t frameIndex,
-        const FrameTransforms& transforms,
-        const std::vector<glm::mat4>& modelMatrices) {
+        const FrameTransforms& transforms) {
 
         profiling::ScopedTimer timer(profiling::Stage::MatrixCopy);
         auto& frame = frames[frameIndex];
         memcpy(frame.mapped, &transforms, sizeof(transforms));
-
-        const size_t modelBytes = modelMatrices.size() * sizeof(glm::mat4);
-        if (modelBytes != 0) {
-            memcpy(frame.modelsMapped, modelMatrices.data(), modelBytes);
-        }
     }
 
     void drawFrameInternal(
         const FrameTransforms& transforms,
-        const std::vector<glm::mat4>& modelMatrices) {
+        const SimulationParameters& simulation) {
         {
             profiling::ScopedTimer timer(profiling::Stage::FenceWait);
             if (vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
@@ -1575,13 +1839,13 @@ private:
         }
 
         // The fence guarantees this frame slot is no longer being read by the GPU.
-        updateFrameData(currentFrame, transforms, modelMatrices);
+        updateFrameData(currentFrame, transforms);
 
         {
             profiling::ScopedTimer timer(profiling::Stage::RecordCommands);
             vkResetFences(device, 1, &inFlightFences[currentFrame]);
             vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
-            recordCommandBuffer(commandBuffers[currentFrame], imageIndex, modelMatrices);
+            recordCommandBuffer(commandBuffers[currentFrame], imageIndex, simulation);
         }
 
         VkSubmitInfo submitInfo{};
@@ -1606,6 +1870,8 @@ private:
                 throw std::runtime_error("failed to submit draw command buffer!");
             }
         }
+        // Advance only after a successful submission (not on skipped acquire frames).
+        currentParticleBuffer = 1 - currentParticleBuffer;
         if constexpr (profiling::ENABLED) {
             if (timestampPool != VK_NULL_HANDLE) {
                 auto& frame = frames[currentFrame];
@@ -1763,7 +2029,8 @@ private:
 
         int i = 0;
         for (const auto& queueFamily : queueFamilies) {
-            if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            const VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+            if ((queueFamily.queueFlags & required) == required) {
                 indices.graphicsFamily = i;
             }
 
@@ -1853,9 +2120,9 @@ Renderer::Renderer(
     uint32_t height,
     const char* title,
     const std::vector<Mesh>& meshes,
-    uint32_t maxInstances,
+    const std::vector<gpu_particle>& initialParticles,
     const std::string& texturePath)
-    : impl(std::make_unique<Impl>(width, height, title, meshes, maxInstances, texturePath)) {
+    : impl(std::make_unique<Impl>(width, height, title, meshes, initialParticles, texturePath)) {
 }
 
 Renderer::~Renderer() = default;
@@ -1874,8 +2141,12 @@ float Renderer::aspectRatio() const {
 
 void Renderer::drawFrame(
     const FrameTransforms& transforms,
-    const std::vector<glm::mat4>& modelMatrices) {
-    impl->drawFrame(transforms, modelMatrices);
+    const SimulationParameters& simulation) {
+    impl->drawFrame(transforms, simulation);
+}
+
+std::vector<gpu_particle> Renderer::readParticles() {
+    return impl->readParticles();
 }
 
 void* Renderer::nativeWindowHandle() const {

@@ -20,3 +20,5 @@
 !graphics/vulkan/src/camera.cpp
 !graphics/vulkan/src/camera.hpp
 !graphics/vulkan/src/profiling.hpp
+!graphics/vulkan/tests/
+!graphics/vulkan/tests/nbody_test.cpp

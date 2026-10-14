@@ -14,8 +14,8 @@ namespace profiling {
 // The only switch: true enables CPU timers, GPU queries, and periodic summaries.
 // Leave false for normal use; rebuild after changing it.
 // Benchmark with -O3 -DNDEBUG to exclude validation overhead; normal build
-// flags are unchanged. GPU render measures a pipeline span (including stalls),
-// not a utilization counter; CPU matrix memcpy does not time GPU memory fetches.
+// flags are unchanged. GPU compute/render measure pipeline spans (including
+// stalls), not utilization counters; CPU memcpy does not time GPU memory fetches.
 inline constexpr bool ENABLED = false;
 inline constexpr std::uint32_t RANDOM_SEED = 12345;
 inline constexpr std::uint64_t WARMUP_FRAMES = 60;
@@ -23,14 +23,14 @@ inline constexpr std::size_t REPORT_FRAMES = 240;
 
 using Clock = std::chrono::steady_clock;
 enum class Stage : std::size_t {
-    EventsCamera, GravityVelocity, PositionModels, CameraMatrices,
+    EventsCamera, CameraMatrices,
     FenceWait, Acquire, MatrixCopy, RecordCommands, Submit, Present, QueryRead,
     Count
 };
 inline constexpr std::size_t STAGE_COUNT = static_cast<std::size_t>(Stage::Count);
 inline constexpr std::array<const char*, STAGE_COUNT> STAGE_NAMES = {
-    "events + camera", "gravity + velocity", "positions + models", "view + projection",
-    "frame fence wait", "image acquisition", "matrix memcpy", "command recording",
+    "events + camera", "view + projection",
+    "frame fence wait", "image acquisition", "camera memcpy", "command recording",
     "queue submission", "presentation call", "GPU query readback"
 };
 
@@ -57,11 +57,12 @@ public:
     }
 
     // GPU results belong to the frame that submitted them, not today's CPU frame.
-    void gpuResult(std::uint64_t id, bool valid, double ms) {
+    void gpuResult(std::uint64_t id, bool valid, double computeMs, double renderMs) {
         if (auto* window = windowFor(id)) {
             ++window->gpuResolved;
             if (valid) {
-                window->gpuTotalMs += ms;
+                window->gpuComputeMs += computeMs;
+                window->gpuTotalMs += renderMs;
                 ++window->gpuSamples;
             }
         }
@@ -94,6 +95,7 @@ private:
         std::size_t copiedBytes = 0;
         double totalMs = 0.0;
         double gpuTotalMs = 0.0;
+        double gpuComputeMs = 0.0;
         std::array<double, STAGE_COUNT> stageMs{};
         std::array<double, REPORT_FRAMES> frameMs{};
         bool reported = false;
@@ -145,11 +147,12 @@ private:
             output << "  other CPU overhead: "
                    << std::max(0.0, window.totalMs - accountedMs) / count << " ms\n";
             if (window.gpuSamples != 0) {
-                output << "  GPU render: " << window.gpuTotalMs / window.gpuSamples
+                output << "  GPU compute: " << window.gpuComputeMs / window.gpuSamples << " ms\n"
+                       << "  GPU render: " << window.gpuTotalMs / window.gpuSamples
                        << " ms, samples=" << window.gpuSamples << '/' << window.gpuExpected
                        << " (overlaps CPU; do not add to frame total)\n";
             } else {
-                output << "  GPU render: unavailable\n";
+                output << "  GPU compute/render: unavailable\n";
             }
             std::cout << output.str() << std::flush;
             window.reported = true;
