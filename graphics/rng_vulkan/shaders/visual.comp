@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 1, std430) readonly buffer StateBuffer {
+    uvec4 states[];
+};
+layout(set = 0, binding = 2, std430) buffer PixelBuffer {
+    uint pixels[];
+};
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= min(params.count, params.visual_samples)) return;
+    if (params.workload == 0u) {
+        vec2 point = uniform4(uvec4(states[id].yz, 0u, 0u)).xy;
+        uvec2 bin = min(uvec2(point * float(IMAGE_SIZE)), uvec2(IMAGE_SIZE - 1u));
+        atomicOr(pixels[bin.y * IMAGE_SIZE + bin.x], inCircle(point) ? 1u : 2u);
+    } else {
+        vec2 point = uintBitsToFloat(states[id].xy) * 0.5 + 0.5;
+        uvec2 bin = min(uvec2(point * float(IMAGE_SIZE)), uvec2(IMAGE_SIZE - 1u));
+        atomicAdd(pixels[bin.y * IMAGE_SIZE + bin.x], 1u);
+    }
+}

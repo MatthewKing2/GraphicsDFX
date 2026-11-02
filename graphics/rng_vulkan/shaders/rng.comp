@@ -1,0 +1,17 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) writeonly buffer RandomBuffer {
+    uvec4 randoms[];
+};
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.count) return;
+    for (uint block = 0u; block < params.blocks; ++block) {
+        // Adjacent invocations write adjacent blocks for coalesced memory access.
+        randoms[block * params.count + id] = randomBlock(id, block);
+    }
+}

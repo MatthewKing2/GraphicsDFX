@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint MODE = 0u;
+layout(constant_id = 1) const uint WORKLOAD = 0u;
+layout(set = 0, binding = 0, std430) readonly buffer RandomBuffer {
+    uvec4 randoms[];
+};
+layout(set = 0, binding = 1, std430) buffer StateBuffer {
+    uvec4 states[];
+};
+
+float stepCoordinate(float position, float sampleValue) {
+    precise float centered = sampleValue * 2.0 - 1.0;
+    precise float increment = centered * params.step_size;
+    precise float next = position + increment;
+    return next < -1.0 ? next + 2.0 : (next >= 1.0 ? next - 2.0 : next);
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.count) return;
+    uint hits = 0u;
+    uvec4 last = uvec4(0u);
+    vec2 position = params.epoch == 0u ? vec2(0.0) : uintBitsToFloat(states[id].xy);
+    for (uint block = 0u; block < params.blocks; ++block) {
+        // The host creates separate specialization pipelines so the split path
+        // contains no Philox arithmetic and the fused path has no random loads.
+        last = MODE == 0u ? randoms[block * params.count + id] : randomBlock(id, block);
+        vec4 u = uniform4(last);
+        if (WORKLOAD == 0u) {
+            hits += inCircle(u.xy) ? 1u : 0u;
+            hits += inCircle(u.zw) ? 1u : 0u;
+        } else {
+            position.x = stepCoordinate(position.x, u.x);
+            position.y = stepCoordinate(position.y, u.y);
+            position.x = stepCoordinate(position.x, u.z);
+            position.y = stepCoordinate(position.y, u.w);
+        }
+    }
+    states[id] = WORKLOAD == 0u ? uvec4(hits, last.z, last.w, 0u)
+                                     : uvec4(floatBitsToUint(position), 0u, 0u);
+}

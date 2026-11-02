@@ -22,3 +22,22 @@
 !graphics/vulkan/src/profiling.hpp
 !graphics/vulkan/tests/
 !graphics/vulkan/tests/nbody_test.cpp
+
+# RNG workload experiment; keep generated builds and profiling output local.
+!graphics/rng_vulkan/
+!graphics/rng_vulkan/CMakeLists.txt
+!graphics/rng_vulkan/README.md
+!graphics/rng_vulkan/JETSON_FPGA.md
+!graphics/rng_vulkan/run.sh
+!graphics/rng_vulkan/src/
+!graphics/rng_vulkan/src/**
+!graphics/rng_vulkan/shaders/
+!graphics/rng_vulkan/shaders/**
+!graphics/rng_vulkan/tests/
+!graphics/rng_vulkan/tests/**
+!graphics/rng_vulkan/tools/
+!graphics/rng_vulkan/tools/**
+graphics/rng_vulkan/tools/__pycache__/
+!graphics/rng_vulkan/measurements/
+!graphics/rng_vulkan/measurements/**
+!graphics/rng_vulkan/PROFILING_COMPARISON.md
