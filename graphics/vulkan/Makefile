@@ -32,14 +32,14 @@ build:
 $(SHADERS) build/scene.spv build/predict.spv $(OUT) build/survival_game.exe build/survival_benchmark.exe build/nbody_test.exe build/nbody_benchmark.exe: | build
 
 GAME_SRC = src/game_main.cpp src/game.cpp src/game_input.cpp src/prediction.cpp src/gpu_prediction.cpp src/renderer.cpp src/nbody.cpp
-GAME_HEADERS = src/game.hpp src/game_input.hpp src/prediction.hpp src/gpu_prediction.hpp src/compute_context.hpp src/renderer.hpp shaders/prediction_kernel.inc
+GAME_HEADERS = src/game.hpp src/game_input.hpp src/prediction.hpp src/gpu_prediction.hpp src/compute_context.hpp src/renderer.hpp shaders/prediction_kernel.inc shaders/tunnel_math.inc
 
 game: build/scene.spv build/predict.spv build/frag.spv build/survival_game.exe
 
 build/scene.spv: shaders/scene.vert
 	$(GLSLC) $< -o $@
 
-build/predict.spv: shaders/predict.comp shaders/prediction_kernel.inc
+build/predict.spv: shaders/predict.comp shaders/prediction_kernel.inc shaders/tunnel_math.inc
 	$(GLSLC) $< -o $@
 
 build/survival_game.exe: $(GAME_SRC) $(GAME_HEADERS)

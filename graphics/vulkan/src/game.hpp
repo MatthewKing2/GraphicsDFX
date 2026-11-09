@@ -3,29 +3,26 @@
 #include "prediction.hpp"
 #include "renderer.hpp"
 #include <string>
-
 namespace survival {
-constexpr float STAGE_LENGTH = 114.0f, ROUTE_START = 32.0f;
-struct Box {
-    glm::vec3 center, half, color;
-    bool solid = false, floor = false;
-};
+constexpr float SECTION_SECONDS = 2.4f, INITIAL_SPEED = 18.0f, FORWARD_ACCELERATION = 1.2f;
 struct State {
-    glm::vec3 feet{0, 3, 0};
-    float verticalSpeed = 0, yaw = 0, pitch = 0;
-    float elapsed = 0, worldTime = 0, deadline = 22, respawnTime = 0;
-    bool grounded = true, won = false;
-    unsigned stage = 0, deaths = 0, run = 1;
+    glm::vec3 feet{0, 0, 0};
+    float localX = 0, lateralSpeed = 0, mouseTarget = 0;
+    float elapsed = 0, worldTime = 0, speed = INITIAL_SPEED, best = 0;
+    bool title = true, dead = false;
+    unsigned stage = 0, run = 1, deaths = 0;
     int branch = -1;
     std::string deathReason;
 };
-struct Hud {
-    bool gpu = true, guidance = true, stats = false, paused = false, pending = false, valid = false;
+struct Guidance {
+    bool gpu = true, enabled = true, stats = false, paused = false, pending = false, valid = false;
     int recommended = 0;
-    float percentages[2] = {0, 0};
+    float percentages[prediction::CHOICES] = {};
     double predictionMs = 0, kernelMs = 0, frameMs = 0, p95Ms = 0;
-    uint32_t rollouts = 512, horizon = 240;
+    uint32_t rollouts = 512, horizon = prediction::HORIZON;
 };
+float distanceAt(float seconds);
+float routeCenter(const prediction::Course &, unsigned stage, unsigned choice, float phase);
 Mesh cubeMesh();
 class Game {
   public:
@@ -37,34 +34,26 @@ class Game {
     const State &state() const {
         return player;
     }
-    const std::vector<Box> &geometry() const {
-        return boxes;
-    }
     const prediction::Course &course() const {
         return data;
     }
     bool approachingJunction() const;
+    uint32_t decision() const;
     prediction::Request request(uint32_t id, uint32_t rollouts) const;
-    void scene(std::vector<SceneInstance> &, const Hud &) const;
+    void scene(std::vector<SceneInstance> &, const Guidance &) const;
     int score() const;
 
   private:
     prediction::Course data;
     State player;
-    std::vector<Box> boxes;
-    float coyote = 0.1f, jumpBuffer = 0;
-    void buildCourse();
     void die(const char *);
-    bool overlaps(const Box &, glm::vec3 feet) const;
 };
-// Deterministic test/demo driver; ordinary interactive play never invokes it.
 class Autopilot {
   public:
-    explicit Autopilot(unsigned routePattern = 7) : pattern(routePattern) {}
     GameControls sample(const Game &);
 
   private:
-    unsigned waypoint = 0, run = 0, stage = prediction::STAGES, pattern;
+    unsigned run = 0;
 };
 void selfTest();
 } // namespace survival

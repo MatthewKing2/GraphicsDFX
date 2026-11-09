@@ -1,121 +1,164 @@
-# DEADLINE / RUNNER
+# VOID / DIVE
 
-A playable first-person survival prototype: choose routes, jump gaps/beams, wait
-for green gates, and beat pursuit to the next checkpoint. The galaxy app remains
-a separate executable. This is the software MVP, not proof of FPGA energy savings.
+The accelerating tunnel iteration replaces the walking corridor MVP. The v1 code
+remains in Git (`113835c`); `survival-game-results.csv` is historical v1 data.
+The N-body app is unchanged.
 
 ## Play
 
-From the repository root on Windows:
+From the repository root:
 
 ```powershell
 .\graphics\vulkan\play.bat
 ```
 
-The launcher builds if needed and selects the correct working directory. Or:
+Or from `graphics/vulkan`: `make game`, then `.\build\survival_game.exe`.
+
+- Space / Enter: start or retry. R: immediate new run.
+- A/D or horizontal mouse movement: steer sideways.
+- No walking, braking, jumping, or free-look. Forward motion is automatic.
+- Escape: pause and release mouse; Escape resumes. Close the window to quit.
+- F1: CPU/GPU prediction; F2: signs/prediction off/on; F3: console/window statistics.
+
+Forks arrive every **2.4 seconds**. Speed starts at 18 units/second, then rises by
+1.2 units/second every second without a forward-speed cap. The first fork has two
+openings; later forks randomly have 2-4. Enter a tunnel, avoid its hazards, merge
+back into the shaft, then choose again. Collision kills immediately.
+
+No gameplay HUD, crosshair, or fixed probability panels. Percentages float in world
+space above the upcoming openings. Green outlines mark the preferred estimate;
+ellipses indicate no fresh result. There are only title, pause and death screens.
+The camera looks down an octagonal shaft, with banking, dark faceted walls, voxel
+text, and sparse speed streaks.
+
+Red spikes are triangular prisms. Rectangles slide, spin CW/CCW, or reverse
+direction. Crusher edges narrow a passage. Collision is checked throughout each
+obstacle's visible forward depth, not just at one central plane. That depth spans
+a 0.1-second contact window as speed increases.
+
+At least one route has a viable center line. Others can be genuinely impossible:
+their aperture is smaller than the player. Such probabilities are computed from
+collision, not manually forced to zero. There are no checkpoints or finish line;
+survival time is the score.
+
+Normal launches choose a fresh course seed; retries repeat it for practice.
+The 32-section layout loops after 76.8 seconds while forward speed keeps rising.
+This is intentionally not unlimited unique procedural content.
+
+Useful options from `graphics/vulkan`:
 
 ```powershell
-cd graphics/vulkan
-make game
-.\build\survival_game.exe
-```
-
-Uses the existing Vulkan SDK/GLFW/GLM/Clang setup. No new libraries or art downloads.
-The Makefile retains the existing Windows SDK configuration; a Jetson-native build
-is not implemented yet.
-
-| Control | Action |
-| --- | --- |
-| WASD / mouse | Grounded movement / look |
-| Space | Jump, with buffering and ledge forgiveness |
-| R or Enter | Restart the entire course |
-| Escape | Pause/resume; release/capture mouse |
-| F1 | Switch CPU/GPU predictor |
-| F2 | Disable/enable prediction and guidance |
-| F3 | Show timing statistics |
-| Close window | Quit |
-
-Losing focus pauses; press Escape to resume. Death explains the cause and restarts
-at the last checkpoint. Revisited checkpoints do not farm pursuit resets. The
-finish screen waits for R/Enter. Orange is faster but has a larger gap and low beam
-to jump. Blue is slower with a smaller gap and no beam. Gates are green/open,
-amber/warning, and red/lethal. Stop before red gates; jumping cannot bypass them.
-
-The test driver completes the three junctions and two checkpoints in roughly 49
-seconds without deaths. Score is distance in decimetres + 1000 per checkpoint,
-minus five points per elapsed second at completion. Death costs time.
-
-Optional arguments, from `graphics/vulkan`:
-
-```powershell
+.\build\survival_game.exe --seed 12345 --backend gpu
 .\build\survival_game.exe --backend cpu --rollouts 512
-.\build\survival_game.exe --fps 60
 .\build\survival_game.exe --autoplay
+.\build\survival_game.exe --fps 0
 .\build\survival_game.exe --help
 ```
 
-Default rendering is capped at 60 FPS by sleeping. Physics runs at 120 Hz independently
-of rendering. `--fps 0` removes the CPU cap, but driver presentation may still pace
-frames. F3/logged frame time includes the cap. `--autoplay` is only a demo/test aid;
-normal prediction never moves or jumps for the player.
+Default cap is 60 FPS with sleeping, not spinning. On Windows a high-resolution
+waitable timer avoids coarse sleep rounding without changing the global timer
+resolution. Physics runs at 120 Hz. The demo/test driver is never active in normal
+play. The build retains the repository's Windows SDK configuration; a Jetson-native
+build is not implemented yet.
 
-## Code map
+## What the probability means
 
-- [game_main.cpp](../graphics/vulkan/src/game_main.cpp): loop, persistent CPU worker,
-  backend switching, request freshness, tests/benchmark entry points.
-- [game.cpp](../graphics/vulkan/src/game.cpp): geometry, collisions, movement,
-  hazards, checkpoints, score, and tiny cube-based bitmap HUD.
-- [game_input.cpp](../graphics/vulkan/src/game_input.cpp): GLFW input and key edges.
-- [renderer.hpp](../graphics/vulkan/src/renderer.hpp): rendering-only constructor
-  and `drawScene(camera, instances)`; objects are not N-body particles.
-- [prediction.hpp](../graphics/vulkan/src/prediction.hpp): explicit course/request/
-  summary layouts; `makeCourse()` in `prediction.cpp` supplies shared course records.
-- [prediction_kernel.inc](../graphics/vulkan/shaders/prediction_kernel.inc): one
-  scalar integer algorithm compiled as C++ and GLSL.
-- [predict.comp](../graphics/vulkan/shaders/predict.comp): one invocation per rollout,
-  workgroup reduction, four aggregate atomics per group rather than per step.
-- [gpu_prediction.cpp](../graphics/vulkan/src/gpu_prediction.cpp): resident course,
-  device-local output, staged 32-byte result, timestamps, and fence polling.
+"Given the incoming lateral position/velocity, how often does our delayed/noisy
+steering controller survive through this tunnel's exit?"
 
-The galaxy shaders are unchanged. A separate scene shader handles world instances
-and HUD rectangles. The game's placeholder texture is generated white, with no
-dependency on the Viking Room asset.
+All choices use the **same section exit**. This versioned model replaces the old
+eight-second jump-failure model. When signs are shown from the previous tunnel,
+prediction is conditional on reaching the next fork: the merge offset/velocity is
+projected forward. It does not promise survival through the currently selected
+tunnel as well.
 
-## Prediction semantics
+Each rollout stores lateral position/velocity, reaction countdown, obstacle index,
+PRNG state, and alive/dead state. At 60 Hz it:
 
-Each immediate choice receives 512 rollouts over the same 8-second horizon, using
-millimetres and 30 ticks/second. Early death/completion bounds work; completion is
-absorbing success. Subsequent turns choose the shortest nominal-time route to the
-next checkpoint, left on ties. Shared records define route geometry, speeds, gate
-periods/phases, and checkpoint structure; meshes never enter the predictor.
+1. Advances delayed steering with acceleration and a lateral speed limit.
+2. Checks nine candidate lateral targets against the next obstacle's arrival and
+   contact-window endpoints, choosing a nearby clear target.
+3. Samples bounded reaction delay, target noise, and arrival-timing uncertainty.
+4. Tests entrance, wall and moving obstacle boundaries at each contact tick.
+5. Stops on collision or counts survival at the common exit.
 
-Defaults model a novice: orange jump failure is 7/8/9% across sectors, blue is
-4.5/5.5/6.5%, low-beam failure is half orange jump failure, and necessary braking
-for a closed gate has a 15% failure chance once per encounter. Initial reaction
-delay, slight speed variation, and +/-3 ticks of arrival/timing error are sampled.
-These probabilities are explicit uncalibrated assumptions, not measured human data.
+There is no independent random "die" coin. Real gameplay receives no random
+steering errors or invisible failures. Controller assumptions are uncalibrated,
+not measured human skill. Prediction is 60 Hz and quantized; actual play is 120 Hz.
+Nine sampled targets are an approximation, particularly at narrow moving edges.
 
-The real player never receives random failures; actual gate phases are deterministic
-and telegraphed. Prediction is a corridor-progress approximation, not continuous
-3D motion: exact strafing, jump arcs, box contacts, and human choices are omitted.
-Candidate-route speed during approach is also approximate. Advice is a model
-estimate, never a guarantee or an autopilot.
+The same Q10 motion/collision functions drive graphical obstacle poses, real
+collisions, C++ rollouts and GLSL rollouts. RNG streams are reproducible, separate
+from course generation, and prefix-stable when rollout counts change.
 
-Unsigned xorshift32 uses hashed seed/route/rollout streams. Sector refreshes use a
-stable seed to suppress resampling noise. Increasing counts preserves stream
-prefixes; gameplay does not depend on prediction RNG.
+Default: 512 rollouts per opening, up to four openings, at most 10 updates/second.
+Three-point recommendation hysteresis limits flicker. Results expire and are
+checked against run, section, course version and simulation age. Only one request
+is pending; the render loop never waits for prediction readback.
 
-Requests run at up to 5 Hz near junctions, one outstanding request at a time. The
-loop polls without waiting, checks run/course/junction tags and simulation age,
-expires guidance after 0.75 seconds, and switches an existing recommendation only
-for a five-percentage-point advantage. Restart/backend changes invalidate guidance.
-Normal interactive prediction does not use device-idle or blocking readback waits.
+## What the FPGA would actually compute
 
-Graphics and compute share a GPU queue: nonblocking host polling does not guarantee
-compute cannot delay rendering. F3 latency includes observation at the next render
-poll, so can be a frame long despite a much shorter kernel.
+It would execute the **whole rollout-and-aggregation engine**, not render meshes,
+run floating-point rigid-body physics, or stream random numbers back to the host.
 
-## Validation and benchmarks
+| Hazard | Shared math | Small hardware building blocks |
+| --- | --- | --- |
+| Triangular spike | Triangular boundary with player-radius margin | Subtract, absolute value, constant scale, compare |
+| Sliding block | Phase-counter position and moving interval overlap | Counter/mask, add/shift, absolute value, compare |
+| Rotating blade | Q10 sine/cosine and projected rectangle tests | Tiny ROM, narrow multiplies/adds, compares |
+| Contracting passage | Time-varying aperture must fit position + radius | Phase counter, triangular wave, scale, compare |
+
+Periods are powers of two. Rotation uses 32 fixed-point directions, shared with
+rendering; reversals reflect phase. No floating-point trigonometry is needed in
+the predictor. Useful prospective widths include 14 signed bits for shaft position,
+9 for velocity, 7-9 for motion phase, and 32 for PRNG. Begin with a few reusable
+engines and local tables, not thousands of fully unrolled simulations. Actual
+resource usage and clock rate require synthesis and timing closure.
+
+Different rollouts update controllers at different times, choose different
+targets, encounter different hazards, and die at different steps. This can cause
+CPU branch misprediction and GPU divergence/inactive lanes. An FPGA could use
+narrow private state machines, interleave contexts through a small pipeline, and
+stop updating dead contexts rather than running a wide SIMD group.
+
+**This is a plausible energy hypothesis, not an inherent CPU/GPU disadvantage or
+an energy result.** CPUs/GPUs can handle these operations well. Shared poses can
+be cached or precomputed by any backend; equivalent optimizations remain allowed.
+Do not add pathological math or inflate rollouts merely to manufacture a win.
+
+LiteFury is an Artix-7 100T board with PCIe Gen2 x4 according to
+[RHS Research](https://github.com/RHSResearchLLC/NiteFury-and-LiteFury).
+No RTL, driver, FPGA resource/timing result, or measured FPGA power is included.
+
+## Memory, PCIe and the success criterion
+
+- Course: **10,240 bytes**, uploaded once and resident (32 sections x four slots).
+- Request: **48 bytes**, including IDs, section, incoming state, clock and seed.
+- Result payload: **64 bytes**, four summaries; unused choice slots stay zero.
+
+At 10 Hz this is **1,120 payload bytes/second**, independent of rollout count.
+A future 16-byte response ID/version/run envelope would make it 1,280 bytes/second.
+These are payload calculations, not measured link utilization or power. Include
+framing, DMA descriptors, interrupts/polling, link transitions, host work and board
+idle power in the eventual experiment. No per-tick or per-rollout PCIe traffic.
+
+The overall project still requires both enjoyable gameplay **and measured lower
+whole-system energy** than the better reasonable Jetson CPU/GPU baseline. Compare
+the same course/replay, model, quality, update rate, deadlines, resolution and FPS.
+Measure total system joules/watts, including board/carrier/link and idle periods,
+without double-counting rails. An attached-idle baseline is informative but does
+not replace comparison to a Jetson without the extra board cost. A cheap CPU/GPU
+job may save less energy than an always-on FPGA/link consumes. Laptop timing
+cannot establish hardware success.
+
+## Code and tests
+
+- `game.cpp`: motion, tunnel geometry, collisions, world signs and menus.
+- `prediction.hpp/.cpp`: versioned layouts and seeded compact course.
+- `shaders/tunnel_math.inc`: shared motion, collision and safe-target selection.
+- `shaders/prediction_kernel.inc`: shared scalar C++/GLSL rollout.
+- `shaders/predict.comp`: four-choice dispatch and workgroup aggregation.
+- `game_main.cpp`: CPU worker, fence-polled GPU results, freshness and frame pacing.
 
 From the repository root:
 
@@ -123,135 +166,38 @@ From the repository root:
 .\graphics\vulkan\tests\game-checks.ps1 -Benchmark -NBody
 ```
 
-This builds, runs headless gameplay checks and exact CPU/GPU aggregate comparisons,
-then performs accelerated rendered playthroughs of both backends with Vulkan
-synchronization validation. Windows are hidden, not minimized. The GPU test captures
-`graphics/vulkan/build/game-fork.bmp` for visual inspection.
-Headless checks complete all eight route combinations without deaths. `-NBody`
-also runs the original galaxy simulation's numerical regression suite.
+Checks cover 20 consecutive viable forks, acceleration/no braking, 2/3/4 choices,
+all obstacle kinds, impossible routes, deterministic streams, stale results, and
+48 exact CPU/GPU comparisons including partial workgroups and course wrapping.
+Rendered tests verify live guidance. Screenshots: `build/game-fork.bmp`,
+`build/game-fourway.bmp`, and `build/game-title.bmp`.
 
-Direct commands from `graphics/vulkan`:
+The optimized benchmark fixes seed 12345 and tests three sections at 256/512/1024
+rollouts per choice, two warmups and six measured requests per case. Output:
+`graphics/vulkan/build/tunnel-benchmark.csv`. It excludes concurrent rendering;
+interactive latency also includes observing completion on a later frame.
+Latency and throughput are **not energy measurements**. Debug screenshots block
+one frame and must be excluded from performance comparisons.
 
-```powershell
-.\build\survival_game.exe --self-test
-.\build\survival_game.exe --validate
-make build/survival_benchmark.exe
-.\build\survival_benchmark.exe --benchmark --output build/game-benchmark.csv
-make test
-```
+Intentional rough edges: no audio, repeated 32-section course, flat geometry and
+a coarse, uncalibrated steering model. Next: playtest steering, decision timing,
+and obstacle readability rather than build a bigger engine.
 
-The benchmark uses `-O3 -DNDEBUG`, three fixed decision states, 256/1024/4096 rollouts
-per choice, three warmups and ten measured requests per case. CPU uses its persistent
-worker; GPU uses the play backend. Polling yields until completion. There is no
-concurrent interactive rendering in these prediction-only measurements.
+## Laptop snapshot (2026-11-09)
 
-CSV fields: submit-to-observation latency, CPU loop/GPU kernel time, rollouts and
-actual executed steps/second, survival estimates, wire payload sizes, exact agreement.
-A 32-seed near-tie stability experiment is printed separately. Render tests log
-average/p95 frame time. Neither these timings nor throughput are energy measurements.
-Debug `--capture build/image.bmp` intentionally blocks one frame and must not be
-enabled for performance comparisons.
+Intel i7-12700H / Vulkan-selected RTX 3050 Ti Laptop GPU. Optimized prediction-only
+requests, seed 12345; six measured samples after two warmups. Raw data:
+[tunnel-game-results.csv](tunnel-game-results.csv). Not Jetson or energy results.
 
-Validated limits: 16,384 rollouts per choice, 480 prediction ticks, three sectors,
-six routes, speeds up to 500 mm/tick. uint32 progress/step aggregates fit these
-bounds. Independent clear-route/deadline/full-course/phase tests supplement shared-
-kernel CPU/GPU agreement. Test cases include partial workgroups and early exits.
+| Section / openings | Rollouts per opening | CPU request latency | GPU request latency | GPU kernel |
+| --- | --- | --- | --- | --- |
+| 0 / 2 | 512 | 1.822 ms | 0.667 ms | 0.528 ms |
+| 1 / 4 | 512 | 3.429 ms | 0.752 ms | 0.531 ms |
+| 4 / 4 | 512 | 3.659 ms | 0.691 ms | 0.543 ms |
 
-## Laptop snapshot: 2026-11-09
-
-Intel Core i7-12700H, Vulkan-selected NVIDIA GeForce RTX 3050 Ti Laptop GPU.
-Optimized prediction-only benchmark; ten measured requests after three warmups.
-Raw rows: [survival-game-results.csv](survival-game-results.csv). Laptop clocks,
-driver scheduling, and background load affect timings; these are not Jetson results.
-
-| Rollouts per choice | CPU end-to-end, state 0 | GPU end-to-end, state 0 | GPU kernel only |
-| --- | --- | --- | --- |
-| 256 | 0.299 ms | 0.247 ms | 0.068 ms |
-| 1024 | 1.096 ms | 0.266 ms | 0.068 ms |
-| 4096 | 4.326 ms | 0.284 ms | 0.080 ms |
-
-State 0 is approach at -10 m with a 500-tick pursuit budget. State 1 is a deeper
-hypothetical lane decision at +21 m, world tick 53; state 2 uses that progress at
-world tick 106 with only 90 pursuit ticks left. State 2 terminates early: at 256
-rollouts the CPU was slightly faster overall (0.113 vs 0.124 ms). Transfer/dispatch
-overhead matters at small workloads, and a speedup is not an energy measurement.
-
-CPU/GPU integer aggregates matched for all benchmark rows and 18 additional edge
-requests. Both rendered backends completed the course without deaths, each applying
-18 live predictions. Capped, validation-enabled accelerated playthroughs averaged
-roughly 17.8–18.0 ms/frame with p95 around 18.4 ms (about 56 FPS under a 60 FPS cap,
-including sleep/scheduler overhead). Earlier uncapped smoke runs were near 144 FPS.
-These are automated rendering checks, not a human playtest or power measurements.
-N-body regression tests and SPIR-V Vulkan 1.0 validation also passed.
-
-For a synthetic 0.5-percentage-point near tie, the theoretically better left route
-won 16/32, 22/32, and 24/32 sampled seeds at 256/1024/4096 rollouts. More work reduces
-noise but does not make tiny distinctions compelling. Retain 512 per choice and
-five-point recommendation hysteresis for the initial playtest rather than increasing
-work merely to create an accelerator workload.
-
-## Jetson + LiteFury: whole-project success
-
-Both enjoyable gameplay and **measured lower whole-system power/energy** are project
-acceptance requirements. The laptop MVP completes neither FPGA implementation nor
-hardware energy validation, and claims no energy advantage.
-
-The workload has narrow integer state, small lookups, branch-dependent paths, and
-variable rollout lifetimes, without floating point, recursion, or external per-step
-traffic. A small reusable FPGA rollout engine is plausible. This does not make the
-CPU/GPU inherently inefficient: both may execute it well. No padded workloads or
-deliberately weak baselines are acceptable.
-
-LiteFury is an Artix-7 100T board with PCIe Gen2 x4 according to the
-[vendor documentation](https://github.com/RHSResearchLLC/NiteFury-and-LiteFury).
-The Orin Nano reference carrier provides an M.2 Key-M PCIe Gen3 x4 slot according to
-[NVIDIA](https://docs.nvidia.com/jetson/orin-nano-devkit/user-guide/latest/hardware_layout.html).
-Verify the actual hardware/link configuration; bandwidth and supply ratings are
-not measurements of power consumption.
-
-| Item | Current payload | Frequency |
-| --- | --- | --- |
-| Course | 288 bytes | Once per course/version |
-| Request | 48 bytes | Up to 5/second near junctions |
-| Result | 32 bytes total for both routes | Once per completed request |
-
-At 5 Hz, steady-state payload is 400 bytes/second regardless of rollout count.
-This excludes packet framing, DMA descriptors, interrupts/polling, and link power.
-The GPU associates output with its retained request/fence; a future PCIe response
-should echo ID/version/run tags in a small envelope, e.g. another 16 bytes. That
-would be 480 payload bytes/second before other overhead. Never stream PRNG output
-or individual rollout states over PCIe.
-
-Keep the course resident and perform complete rollouts/aggregation on the FPGA.
-Start with a few reusable engines, not an assumption of thousands of circuits.
-RTL, synthesis/timing closure, DMA drivers, and actual FPGA transport remain future
-work. This iteration does not implement or simulate FPGA power numbers.
-
-Later measurement protocol:
-
-1. Fix course/state/replay, render resolution/FPS, prediction cadence/horizon, and
-   acceptable guidance quality. Include representative idle intervals and near ties.
-2. Compare Jetson CPU, Jetson GPU, and Jetson + FPGA at the same complete-system
-   power boundary. Include board/carrier/link power; do not count rails twice if
-   Jetson input power already includes the M.2 card. Module telemetry may omit
-   relevant carrier or board consumption.
-3. Measure attached-but-idle FPGA/link cost and submission/readback overhead
-   separately. This informative baseline does not replace Jetson-only comparison
-   without the extra card cost. Count only results delivered before their deadline.
-4. Report average watts, integrated joules for an identical replay interval, and
-   joules/useful decision with repeated runs. Compare to the better reasonable
-   Jetson backend, not an artificially weak implementation.
-5. Accept improvement only if saved Jetson energy exceeds extra FPGA/link/host
-   energy. If not, revisit genuinely useful model fidelity or idle/clock behavior,
-   or report the hypothesis failed. Increase rollout count only when guidance
-   quality measurably benefits.
-
-At this small workload and intermittent update rate, FPGA/PCIe idle power may
-outweigh saved CPU/GPU energy. This is a central experimental risk, not a result
-that laptop timings can establish either way.
-
-## Intentional rough edges
-
-Handcrafted level, face-shaded cubes, no audio, basic box physics, no render
-interpolation, tiny bitmap text, and an uncalibrated coarse predictor. The next
-useful step is a human playtest and targeted tuning, not an engine rewrite.
+All aggregates matched exactly. Rendering tests averaged about 17.1 ms/frame with
+p95 about 17.4 ms (~58 FPS under the 60 FPS cap, including the timer wait), with
+Vulkan synchronization validation enabled. Both backends passed 20 consecutive
+forks and applied 100 live predictions in the accelerated test. The hazard set,
+course wrap, impossible paths, screenshot views and original N-body regressions
+also passed. Actual human play and hardware power remain to be tested.

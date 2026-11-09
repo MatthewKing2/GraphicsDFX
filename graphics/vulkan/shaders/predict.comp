@@ -1,42 +1,42 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x=64) in;
+struct Obstacle {
+    uint kind; uint phase; uint period; uint flags;
+    int offset; int extent; int amplitude; int opening;
+};
 struct Route {
-    uint lengthMm; uint speedMmPerTick; uint gapStart; uint gapEnd;
-    uint hurdleMm; uint gateMm; uint period; uint activeTicks;
-    uint phase; uint warningTicks; uint jumpFailure; uint reactionMax;
+    uint choiceCount; uint seed; uint reactionTicks; uint lateralNoise;
+    Obstacle obstacles[2];
 };
 struct Request {
     uint id; uint courseVersion; uint run; uint junction;
-    int progressMm; uint budgetTicks; uint worldTick; uint seed;
+    int xMm; int velocity; uint worldTick; uint seed;
     uint rollouts; uint horizon; uint routeCount; uint reserved;
 };
-layout(binding=0, std430) readonly buffer Course { Route routes[]; } course;
-layout(binding=1, std430) buffer Results { uvec4 totals[2]; } outputData;
+struct Pose { int center; int cosine; int sine; int aperture; };
+layout(binding=0,std430) readonly buffer Course { Route routes[]; } course;
+layout(binding=1,std430) buffer Results { uvec4 totals[4]; } outputData;
 layout(push_constant) uniform Parameters { Request request; } parameters;
 #define COURSE_PARAM
 #include "prediction_kernel.inc"
 shared uvec4 partial[64];
 void main() {
-    uint index = gl_GlobalInvocationID.x;
-    uint choice = gl_WorkGroupID.y;
-    uint local = gl_LocalInvocationID.x;
-    uvec4 sum = uvec4(0);
-    if (index < parameters.request.rollouts) {
-        RolloutResult r = rollout(parameters.request, choice, index);
-        sum = uvec4(r.survived, r.progress, r.steps, 1);
+    uint index=gl_GlobalInvocationID.x,choice=gl_WorkGroupID.y,local=gl_LocalInvocationID.x;
+    uvec4 sum=uvec4(0);
+    if(index<parameters.request.rollouts) {
+        RolloutResult r=rollout(parameters.request,choice,index);
+        sum=uvec4(r.survived,r.progress,r.steps,1);
     }
-    partial[local] = sum;
-    barrier();
-    for (uint offset=32; offset>0; offset >>= 1) {
-        if (local < offset) partial[local] += partial[local+offset];
+    partial[local]=sum;barrier();
+    for(uint offset=32;offset>0;offset>>=1) {
+        if(local<offset) partial[local]+=partial[local+offset];
         barrier();
     }
-    if (local == 0) {
-        // Four atomics per workgroup, not per step or per simulated player.
-        atomicAdd(outputData.totals[choice].x, partial[0].x);
-        atomicAdd(outputData.totals[choice].y, partial[0].y);
-        atomicAdd(outputData.totals[choice].z, partial[0].z);
-        atomicAdd(outputData.totals[choice].w, partial[0].w);
+    if(local==0) {
+        atomicAdd(outputData.totals[choice].x,partial[0].x);
+        atomicAdd(outputData.totals[choice].y,partial[0].y);
+        atomicAdd(outputData.totals[choice].z,partial[0].z);
+        atomicAdd(outputData.totals[choice].w,partial[0].w);
     }
 }

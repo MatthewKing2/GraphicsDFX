@@ -1,5 +1,8 @@
 # Survival runner MVP roadmap
 
+Historical v1 roadmap. The accelerating tunnel iteration supersedes the walking
+course and HUD below; see [the current play/model guide](survival-game.md).
+
 Status: approved for implementation. The playable MVP is the first software
 milestone; whole-project success additionally requires measured hardware energy savings.
 

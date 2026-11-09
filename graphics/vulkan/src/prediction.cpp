@@ -2,87 +2,111 @@
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
-
 namespace prediction {
+using std::abs;
+using std::clamp;
 using std::max;
 using std::min;
 #define COURSE_PARAM const Course &course,
 #include "../shaders/prediction_kernel.inc"
 #undef COURSE_PARAM
 
-Course makeCourse() {
+Course makeCourse(uint seed) {
     Course course{};
     for (uint stage = 0; stage < STAGES; ++stage) {
-        // Short orange route: two demanding jumps. Blue route: slower movement,
-        // smaller gap, more forgiving jumps, and a long-open timed gate.
-        course.routes[stage * 2] = {
-            82000, 267, 28000, 30000, 44000, 58000, 150, 42, stage * 37, 21, 700 + stage * 100, 6};
-        course.routes[stage * 2 + 1] = {
-            82000, 227, 33000, 34400, 0, 50000, 180, 30, 65 + stage * 41, 24, 450 + stage * 100, 9};
+        uint rng = mixSeed(seed ^ (stage * 0x9e3779b9u));
+        uint count = stage == 0u ? 2u : 2u + rng % 3u;
+        uint safe = (rng >> 8u) % count;
+        uint sealed = (safe + 1u + (rng >> 16u) % (count - 1u)) % count;
+        for (uint choice = 0; choice < CHOICES; ++choice) {
+            auto &r = course.routes[stage * 4 + choice];
+            rng = randomNext(rng);
+            r.choiceCount = count;
+            r.seed = rng;
+            r.reactionTicks = 4u + (rng & 3u);
+            r.lateralNoise = 70u + ((rng >> 8u) & 127u);
+            for (uint event = 0; event < 2; ++event) {
+                rng = randomNext(rng);
+                auto &o = r.obstacles[event];
+                o.kind = (stage + choice + event) % 4;
+                o.phase = rng & 255u;
+                o.period = 6u + ((rng >> 8u) % 3u);
+                o.flags = (rng >> 12u) & 3u;
+                o.offset = int((rng >> 16u) % 1001u) - 500;
+                o.extent = o.kind == 0 ? 1700 : o.kind == 1 ? 400 : 1750;
+                o.amplitude = 1000;
+                o.opening = 650;
+            }
+            if (choice == safe) {
+                r.reactionTicks = 4;
+                r.lateralNoise = 80;
+                r.obstacles[0] = {0, 0, 7, 0, -1100, 1500, 0, 0};
+                r.obstacles[1] = {0, 0, 7, 1, 1100, 1500, 0, 0};
+            } else if (choice == sealed && (stage % 3u) != 0u) {
+                // Genuinely impassable: even the widest aperture is smaller than
+                // the player. The probability is computed, not hard-coded to 0.
+                r.obstacles[1] = {3, 0, 7, 0, 0, 90, 0, 60};
+            }
+        }
     }
     return course;
 }
-void validate(const Course &course, const Request &r) {
-    if (r.courseVersion != COURSE_VERSION || r.junction >= STAGES || r.routeCount != 6 ||
-        r.rollouts == 0 || r.rollouts > MAX_ROLLOUTS || r.horizon == 0 || r.horizon > MAX_HORIZON ||
-        r.progressMm < -32000 || r.progressMm > 82000 || r.budgetTicks > 10000 ||
-        r.worldTick > 10000000) {
-        throw std::invalid_argument("prediction request outside documented bounds");
-    }
-    for (const auto &route : course.routes) {
-        if (route.lengthMm == 0 || route.lengthMm > 100000 || route.speedMmPerTick < 20 ||
-            route.speedMmPerTick > 500 || route.period == 0 || route.period > 10000 ||
-            route.activeTicks >= route.period ||
-            route.warningTicks >= route.period - route.activeTicks || route.phase > 10000 ||
-            route.jumpFailure > 10000 || route.reactionMax > 120 || route.gapStart > route.gapEnd ||
-            route.gapEnd > route.lengthMm || route.hurdleMm > route.lengthMm ||
-            route.gateMm > route.lengthMm) {
-            throw std::invalid_argument("invalid corridor record");
-        }
+uint choices(const Course &c, uint section) {
+    return c.routes[(section & 31u) * 4].choiceCount;
+}
+const Route &route(const Course &c, uint section, uint choice) {
+    return c.routes[(section & 31u) * 4 + choice];
+}
+void validate(const Course &c, const Request &r) {
+    if (r.courseVersion != COURSE_VERSION || r.rollouts == 0 || r.rollouts > MAX_ROLLOUTS ||
+        r.horizon != HORIZON || r.routeCount != choices(c, r.junction) || r.routeCount < 2 ||
+        r.routeCount > 4 || r.junction > 60000 || r.worldTick > 10000000 || r.xMm < -8000 ||
+        r.xMm > 8000 || r.velocity < -MAX_VELOCITY || r.velocity > MAX_VELOCITY ||
+        r.worldTick > r.junction * SECTION_TICKS + ENTRY_TICK)
+        throw std::invalid_argument("invalid tunnel prediction request");
+    for (const auto &route : c.routes) {
+        if (route.choiceCount < 2 || route.choiceCount > 4 || route.reactionTicks > 20 ||
+            route.lateralNoise > 500)
+            throw std::invalid_argument("invalid tunnel route");
+        for (const auto &o : route.obstacles)
+            if (o.kind > 3 || o.period < 6 || o.period > 9 || std::abs(o.offset) > 2000 ||
+                o.extent < 0 || o.extent > 3000 || o.amplitude < 0 || o.amplitude > 2000 ||
+                o.opening < 0 || (o.kind == 3u && o.opening > o.extent))
+                throw std::invalid_argument("invalid tunnel obstacle");
     }
 }
-Result evaluate(const Course &course, const Request &request) {
-    validate(course, request);
-    const auto start = std::chrono::steady_clock::now();
+Result evaluate(const Course &c, const Request &r) {
+    validate(c, r);
+    auto start = std::chrono::steady_clock::now();
     Result result;
-    result.request = request;
-    for (uint choice = 0; choice < CHOICES; ++choice) {
-        auto &sum = result.routes[choice];
-        for (uint index = 0; index < request.rollouts; ++index) {
-            const auto r = rollout(course, request, choice, index);
-            sum.survived += r.survived;
-            sum.progressMm += r.progress;
-            sum.steps += r.steps;
+    result.request = r;
+    for (uint choice = 0; choice < r.routeCount; ++choice)
+        for (uint n = 0; n < r.rollouts; ++n) {
+            auto one = rollout(c, r, choice, n);
+            auto &sum = result.routes[choice];
+            sum.survived += one.survived;
+            sum.progressTicks += one.progress;
+            sum.steps += one.steps;
             ++sum.rollouts;
         }
-    }
     result.latencyMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     result.kernelMs = result.latencyMs;
     return result;
 }
 bool sameResults(const Result &a, const Result &b) {
-    for (uint c = 0; c < CHOICES; ++c) {
+    for (uint c = 0; c < CHOICES; ++c)
         if (a.routes[c].survived != b.routes[c].survived ||
-            a.routes[c].progressMm != b.routes[c].progressMm ||
+            a.routes[c].progressTicks != b.routes[c].progressTicks ||
             a.routes[c].steps != b.routes[c].steps || a.routes[c].rollouts != b.routes[c].rollouts)
             return false;
-    }
     return true;
 }
 float survival(const Result &r, uint c) {
-    return r.routes[c].rollouts ? float(r.routes[c].survived) / r.routes[c].rollouts : 0.0f;
+    return r.routes[c].rollouts ? float(r.routes[c].survived) / r.routes[c].rollouts : 0;
 }
-bool gateActive(const Route &r, uint tick) {
-    return (tick + r.phase) % r.period < r.activeTicks;
-}
-bool gateWarning(const Route &r, uint tick) {
-    const uint phase = (tick + r.phase) % r.period;
-    return phase >= r.period - r.warningTicks;
-}
-bool applies(const Request &request, uint run, uint junction, uint worldTick) {
-    return request.run == run && request.junction == junction &&
-           request.courseVersion == COURSE_VERSION && worldTick >= request.worldTick &&
-           worldTick - request.worldTick <= 30;
+bool applies(const Request &r, uint run, uint junction, uint tick) {
+    return r.run == run && r.junction == junction && r.courseVersion == COURSE_VERSION &&
+           tick >= r.worldTick && tick - r.worldTick <= 30;
 }
 } // namespace prediction

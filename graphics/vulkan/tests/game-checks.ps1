@@ -50,6 +50,8 @@ try {
     Run-GameCheck 'validation' @('--validate')
     Run-GameCheck 'gpu-smoke' @('--smoke','--backend','gpu','--capture','build/game-fork.bmp')
     Run-GameCheck 'cpu-smoke' @('--smoke','--backend','cpu')
+    Run-GameCheck 'four-way' @('--smoke','--frames','43','--capture-frame','40','--capture','build/game-fourway.bmp')
+    Run-GameCheck 'title' @('--frames','1','--seed','12345','--capture-frame','0','--capture','build/game-title.bmp')
     if($NBody) {Run-GameCheck 'nbody-regression' @() 'nbody_test.exe'}
     if($Benchmark) {
         & make -C $project build/survival_benchmark.exe

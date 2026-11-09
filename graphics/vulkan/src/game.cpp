@@ -3,16 +3,20 @@
 #include <array>
 #include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 namespace survival {
 namespace {
-const glm::vec3 orange(1.0f, 0.37f, 0.08f), blue(0.12f, 0.62f, 1.0f), mint(0.15f, 1.0f, 0.65f);
-void object(std::vector<SceneInstance> &scene, glm::vec3 center, glm::vec3 size, glm::vec3 color) {
+const glm::vec3 cyan(.08f, .75f, .85f), violet(.5f, .12f, .8f), red(.95f, .025f, .065f),
+    white(.8f, .9f, 1);
+void object(std::vector<SceneInstance> &scene, glm::vec3 center, glm::vec3 size, glm::vec3 color,
+            float primitive = 1) {
     SceneInstance item;
     item.transform = glm::scale(glm::translate(glm::mat4(1), center), size);
-    item.tint = glm::vec4(color, 1);
+    item.tint = glm::vec4(color, primitive);
     scene.push_back(item);
 }
 void rectangle(std::vector<SceneInstance> &scene, float x, float y, float w, float h,
@@ -115,17 +119,68 @@ std::array<uint8_t, 7> glyph(char c) {
         return {};
     }
 }
-void text(std::vector<SceneInstance> &scene, float x, float y, const std::string &value,
-          float scale, glm::vec3 color) {
+void screenText(std::vector<SceneInstance> &scene, float x, float y, const std::string &value,
+                float scale, glm::vec3 color) {
     for (char c : value) {
-        const auto rows = glyph(c);
+        auto rows = glyph(c);
         for (int row = 0; row < 7; ++row)
-            for (int col = 0; col < 5; ++col) {
+            for (int col = 0; col < 5; ++col)
                 if (rows[row] & (1 << (4 - col)))
                     rectangle(scene, x + col * scale, y + row * scale, scale, scale, color);
-            }
         x += 6 * scale;
     }
+}
+void worldText(std::vector<SceneInstance> &scene, glm::vec3 center, const std::string &value,
+               float scale, glm::vec3 color) {
+    float x = center.x - float(value.size() * 6 - 1) * scale * .5f;
+    for (char c : value) {
+        auto rows = glyph(c);
+        for (int row = 0; row < 7; ++row)
+            for (int col = 0; col < 5; ++col)
+                if (rows[row] & (1 << (4 - col)))
+                    object(scene, {x + col * scale, center.y, center.z + (3 - row) * scale},
+                           {scale * .88f, .035f, scale * .88f}, color, 3);
+        x += 6 * scale;
+    }
+}
+void ring(std::vector<SceneInstance> &scene, float x, float y, float radius, float thickness,
+          glm::vec3 color) {
+    for (int side = 0; side < 8; ++side) {
+        float angle = (side + .5f) * glm::radians(45.0f);
+        glm::vec3 normal(std::cos(angle), 0, std::sin(angle)),
+            tangent(std::sin(angle), 0, -std::cos(angle));
+        SceneInstance item;
+        item.transform[0] = glm::vec4(tangent * (2 * radius * std::tan(glm::radians(22.5f))), 0);
+        item.transform[1] = glm::vec4(0, thickness, 0, 0);
+        item.transform[2] = glm::vec4(normal * .055f, 0);
+        item.transform[3] = glm::vec4(glm::vec3(x, y, 0) + normal * radius, 1);
+        item.tint = glm::vec4(color, 3);
+        scene.push_back(item);
+    }
+}
+void tube(std::vector<SceneInstance> &scene, float x0, float x1, float y0, float y1, float radius,
+          glm::vec3 tint) {
+    if (y1 <= y0)
+        return;
+    for (int side = 0; side < 8; ++side) {
+        float angle = (side + .5f) * glm::radians(45.0f);
+        glm::vec3 normal(std::cos(angle), 0, std::sin(angle)),
+            tangent(std::sin(angle), 0, -std::cos(angle));
+        SceneInstance item;
+        item.transform[0] =
+            glm::vec4(tangent * (2 * radius * std::tan(glm::radians(22.5f)) + .02f), 0);
+        item.transform[1] = glm::vec4(x1 - x0, y1 - y0, 0, 0);
+        item.transform[2] = glm::vec4(normal * .15f, 0);
+        item.transform[3] =
+            glm::vec4(glm::vec3((x0 + x1) * .5f, (y0 + y1) * .5f, 0) + normal * radius, 1);
+        item.tint = glm::vec4(tint * (side % 2 ? .7f : 1.0f), 1);
+        scene.push_back(item);
+    }
+}
+std::string seconds(float t) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1) << t;
+    return out.str();
 }
 } // namespace
 Mesh cubeMesh() {
@@ -145,469 +200,391 @@ Mesh cubeMesh() {
     }
     return mesh;
 }
-Game::Game(const prediction::Course &course) : data(course) {
-    buildCourse();
+
+float distanceAt(float seconds) {
+    return INITIAL_SPEED * seconds + .5f * FORWARD_ACCELERATION * seconds * seconds;
 }
-void Game::buildCourse() {
-    auto add = [&](glm::vec3 c, glm::vec3 size, glm::vec3 color, bool solid = false,
-                   bool floor = false) { boxes.push_back({c, size * .5f, color, solid, floor}); };
-    auto floor = [&](float x, float width, float begin, float end, glm::vec3 color) {
-        if (end > begin)
-            add({x, (begin + end) * .5f, -.25f}, {width, end - begin, .5f}, color, false, true);
-    };
-    for (unsigned stage = 0; stage < prediction::STAGES; ++stage) {
-        const float base = stage * STAGE_LENGTH;
-        floor(0, 8, base - (stage == 0 ? 5 : 0), base + 24, {.09f, .13f, .2f});
-        floor(0, 24, base + 24, base + 40, {.14f, .19f, .26f});
-        floor(0, 24, base + 96, base + 110, {.12f, .2f, .23f});
-        floor(0, 8, base + 110, base + 114, {.09f, .2f, .18f});
-        for (int side : {-1, 1}) {
-            add({side * 4.5f, base + 10, 1.3f}, {1, 28, 2.6f}, {.16f, .2f, .28f}, true);
-            add({side * 12.5f, base + 67, 1.3f}, {1, 86, 2.6f}, {.12f, .17f, .23f}, true);
-        }
-        add({0, base + 68, 1.4f}, {11, 56, 2.8f}, {.11f, .14f, .2f}, true);
-        for (unsigned branch = 0; branch < 2; ++branch) {
-            float x = branch ? 8.0f : -8.0f;
-            auto color = branch ? blue : orange;
-            const auto &route = data.routes[stage * 2 + branch];
-            float gapStart = base + ROUTE_START + route.gapStart * .001f;
-            float gapEnd = base + ROUTE_START + route.gapEnd * .001f;
-            floor(x, 5, base + 40, gapStart, color * .3f);
-            floor(x, 5, gapEnd, base + 96, color * .3f);
-            for (float y = base + 42; y < base + 96; y += 7) {
-                add({x - 2.35f, y, .025f}, {.12f, 1.8f, .05f}, color);
-                add({x + 2.35f, y, .025f}, {.12f, 1.8f, .05f}, color);
-            }
-            for (float y : {gapStart - .15f, gapEnd + .15f})
-                add({x, y, .04f}, {5, .22f, .08f}, orange);
-            if (route.hurdleMm) {
-                float y = base + ROUTE_START + route.hurdleMm * .001f;
-                add({x - 2.5f, y, .5f}, {.18f, .3f, 1}, orange);
-                add({x + 2.5f, y, .5f}, {.18f, .3f, 1}, orange);
-            }
-            float gateY = base + ROUTE_START + route.gateMm * .001f;
-            for (int side : {-1, 1})
-                add({x + side * 2.4f, gateY, 1.6f}, {.2f, .4f, 3.2f}, color * .6f);
-            // Physical route sign: arrow stem and two diagonal arms.
-            add({x, base + 35, .08f}, {.22f, 3, .15f}, color);
-            for (int side : {-1, 1}) {
-                add({x + side * .5f, base + 35.8f, .08f}, {1.2f, .25f, .15f}, color);
-            }
-        }
-        add({0, base + 111, .035f}, {8, .35f, .07f}, mint);
-        for (int side : {-1, 1})
-            add({side * 4.3f, base + 111, 2}, {.3f, .4f, 4}, mint * .7f);
-        add({0, base + 111, 4}, {9, .4f, .3f}, mint);
-    }
-    add({0, -4, 1.5f}, {9, .6f, 3}, {.15f, .2f, .3f}, true);
+float routeCenter(const prediction::Course &course, unsigned stage, unsigned choice, float phase) {
+    float t = std::clamp((phase - .82f) / .18f, 0.0f, 1.0f);
+    t = t * t * (3 - 2 * t);
+    return prediction::laneCenter(prediction::choices(course, stage), choice) * .001f * (1 - t);
 }
-void Game::look(float dx, float dy) {
-    player.yaw = std::remainder(player.yaw + dx * .10f, 360.0f);
-    player.pitch = std::clamp(player.pitch - dy * .10f, -82.0f, 82.0f);
+Game::Game(const prediction::Course &course) : data(course) {}
+void Game::look(float dx, float) {
+    // Relative mouse movement steers the player, not a freely flying camera.
+    player.mouseTarget = std::clamp(player.mouseTarget + dx * .014f, -7.7f, 7.7f);
 }
-bool Game::overlaps(const Box &box, glm::vec3 feet) const {
-    return std::abs(feet.x - box.center.x) < box.half.x + .28f &&
-           std::abs(feet.y - box.center.y) < box.half.y + .28f &&
-           feet.z < box.center.z + box.half.z && feet.z + 1.65f > box.center.z - box.half.z;
+void Game::restart(bool) {
+    unsigned generation = player.run + 1;
+    float best = std::max(player.best, player.elapsed);
+    player = State{};
+    player.run = generation;
+    player.best = best;
+    player.title = false;
 }
 void Game::die(const char *why) {
-    if (player.respawnTime > 0 || player.won)
+    if (player.dead)
         return;
+    player.dead = true;
     player.deathReason = why;
-    player.respawnTime = .9f;
     ++player.deaths;
-}
-void Game::restart(bool fromBeginning) {
-    const unsigned nextRun = player.run + 1;
-    if (fromBeginning)
-        player = State{};
-    else {
-        player.feet = {0, player.stage * STAGE_LENGTH + 3, 0};
-        player.verticalSpeed = 0;
-        player.yaw = 0;
-        player.pitch = 0;
-        player.deadline = 22;
-        player.respawnTime = 0;
-        player.grounded = true;
-        player.branch = -1;
-    }
-    player.run = nextRun;
-    coyote = .1f;
-    jumpBuffer = 0;
+    player.best = std::max(player.best, player.elapsed);
 }
 void Game::step(const GameControls &input, float dt) {
-    if (input.restart) {
+    if (input.restart || ((player.title || player.dead) && input.jump)) {
         restart();
         return;
     }
-    if (player.won)
+    if (player.title || player.dead)
         return;
-    if (player.respawnTime > 0) {
-        player.respawnTime -= dt;
-        if (player.respawnTime <= 0)
-            restart(false);
-        return;
-    }
+    const float before = player.elapsed;
+    const float sectionStart = player.stage * SECTION_SECONDS;
+    const float previousPhase = (before - sectionStart) / SECTION_SECONDS;
+    const float targetSpeed =
+        std::abs(input.strafe) > .01f
+            ? input.strafe * 12.0f
+            : std::clamp((player.mouseTarget - player.localX) * 8.0f, -12.0f, 12.0f);
+    player.lateralSpeed += std::clamp(targetSpeed - player.lateralSpeed, -80 * dt, 80 * dt);
+    player.localX += player.lateralSpeed * dt;
+    if (std::abs(input.strafe) > .01f)
+        player.mouseTarget = player.localX;
     player.elapsed += dt;
-    player.worldTime += dt;
-    player.deadline -= dt;
-    if (player.deadline <= 0) {
-        die("PURSUIT CAUGHT YOU");
-        return;
-    }
-    if (input.jump)
-        jumpBuffer = .12f;
-    else
-        jumpBuffer = std::max(0.0f, jumpBuffer - dt);
-    coyote = player.grounded ? .10f : std::max(0.0f, coyote - dt);
-    if (jumpBuffer > 0 && coyote > 0) {
-        player.verticalSpeed = 6;
-        player.grounded = false;
-        coyote = 0;
-        jumpBuffer = 0;
-    }
-    const float yaw = glm::radians(player.yaw);
-    glm::vec2 direction = glm::vec2(std::sin(yaw), std::cos(yaw)) * input.forward +
-                          glm::vec2(std::cos(yaw), -std::sin(yaw)) * input.strafe;
-    const float length = glm::length(direction);
-    if (length > 1)
-        direction /= length;
-    float speed = 8;
-    if (player.branch >= 0)
-        speed = data.routes[player.stage * 2 + player.branch].speedMmPerTick * .03f;
-    for (int axis = 0; axis < 2; ++axis) {
-        const auto before = player.feet;
-        player.feet[axis] += direction[axis] * speed * dt;
-        for (const auto &box : boxes)
-            if (box.solid && overlaps(box, player.feet)) {
-                player.feet = before;
-                break;
-            }
-    }
-    float previousZ = player.feet.z;
-    player.verticalSpeed -= 18 * dt;
-    player.feet.z += player.verticalSpeed * dt;
-    player.grounded = false;
-    if (player.verticalSpeed <= 0)
-        for (const auto &box : boxes) {
-            if (!box.floor)
-                continue;
-            float top = box.center.z + box.half.z;
-            if (previousZ >= top - .001f && player.feet.z <= top &&
-                std::abs(player.feet.x - box.center.x) < box.half.x + .16f &&
-                std::abs(player.feet.y - box.center.y) < box.half.y + .16f) {
-                player.feet.z = top;
-                player.verticalSpeed = 0;
-                player.grounded = true;
-                break;
+    player.worldTime = player.elapsed;
+    player.speed = INITIAL_SPEED + FORWARD_ACCELERATION * player.elapsed;
+    player.feet.y = distanceAt(player.elapsed);
+    const float phase = (player.elapsed - sectionStart) / SECTION_SECONDS;
+    const float entry = float(prediction::ENTRY_TICK) / prediction::SECTION_TICKS;
+    if (player.branch < 0 && phase >= entry) {
+        auto count = prediction::choices(data, player.stage);
+        int closest = 0;
+        float distance = 100;
+        for (unsigned choice = 0; choice < count; ++choice) {
+            float center = prediction::laneCenter(count, choice) * .001f;
+            if (std::abs(player.localX - center) < distance) {
+                distance = std::abs(player.localX - center);
+                closest = int(choice);
             }
         }
-    const float base = player.stage * STAGE_LENGTH;
-    if (player.feet.y >= base + 40 && player.feet.y < base + 96 && std::abs(player.feet.x) > 5.5f)
-        player.branch = player.feet.x > 0 ? 1 : 0;
-    const uint32_t tick = uint32_t(player.worldTime * 30);
-    for (unsigned branch = 0; branch < 2; ++branch) {
-        const auto &route = data.routes[player.stage * 2 + branch];
-        const float x = branch ? 8.0f : -8.0f;
-        if (route.hurdleMm && overlaps({{x, base + ROUTE_START + route.hurdleMm * .001f, .225f},
-                                        {2.5f, .2f, .225f},
-                                        {},
-                                        false,
-                                        false},
-                                       player.feet)) {
-            die("JUMP OVER THE ORANGE BEAM");
-            return;
-        }
-        if (prediction::gateActive(route, tick) &&
-            overlaps({{x, base + ROUTE_START + route.gateMm * .001f, 1.5f},
-                      {2.5f, .25f, 1.5f},
-                      {},
-                      false,
-                      false},
-                     player.feet)) {
-            die("RED GATE - WAIT FOR GREEN");
+        float center = prediction::laneCenter(count, unsigned(closest)) * .001f;
+        player.localX -= center;
+        player.mouseTarget -= center;
+        player.branch = closest;
+        if (std::abs(player.localX) > prediction::TUNNEL_LIMIT * .001f) {
+            die("MISSED THE OPENING");
             return;
         }
     }
-    if (player.feet.z < -3) {
-        die("MISSED THE GAP - SPACE TO JUMP");
-        return;
+    if (player.branch >= 0) {
+        if (std::abs(player.localX) > prediction::TUNNEL_LIMIT * .001f) {
+            die("TUNNEL WALL");
+            return;
+        }
+        const auto &route = prediction::route(data, player.stage, unsigned(player.branch));
+        for (unsigned event = 0; event < 2; ++event) {
+            float eventPhase = float(prediction::HAZARD_TICKS[event]) / prediction::SECTION_TICKS;
+            // Test the whole visible hazard depth, not just its central plane.
+            const float halfWindow = 3.0f / prediction::SECTION_TICKS;
+            if (previousPhase <= eventPhase + halfWindow && phase >= eventPhase - halfWindow) {
+                unsigned tick = unsigned(player.worldTime * 60);
+                if (prediction::blocked(route.obstacles[event],
+                                        int(std::round(player.localX * 1000)), tick)) {
+                    const char *names[] = {"RED SPIKE", "SLIDING BLOCK", "ROTATING BLADE",
+                                           "CRUSHING PASSAGE"};
+                    die(names[route.obstacles[event].kind]);
+                    return;
+                }
+            }
+        }
+        player.feet.x =
+            routeCenter(data, player.stage, unsigned(player.branch), phase) + player.localX;
+    } else {
+        player.feet.x = player.localX;
+        if (std::abs(player.localX) > 7.8f) {
+            die("OUTER SHAFT WALL");
+            return;
+        }
     }
-    if (player.feet.y >= base + STAGE_LENGTH && player.stage + 1 < prediction::STAGES) {
+    if (phase >= 1) {
         ++player.stage;
-        player.deadline = 22;
         player.branch = -1;
+        player.feet.x = player.localX;
+        // Cursor target remains local at each merge, avoiding automatic cross-shaft jumps.
+        player.mouseTarget = std::clamp(player.mouseTarget, -7.7f, 7.7f);
     }
-    if (player.feet.y >= STAGE_LENGTH * prediction::STAGES - 2 && std::abs(player.feet.x) < 4.3f)
-        player.won = true;
 }
-FrameTransforms Game::transforms(float aspect) const {
-    const float yaw = glm::radians(player.yaw), pitch = glm::radians(player.pitch);
-    glm::vec3 forward(std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch),
-                      std::sin(pitch));
-    const auto eye = player.feet + glm::vec3(0, 0, 1.55f);
-    FrameTransforms frame;
-    frame.view = glm::lookAt(eye, eye + forward, glm::vec3(0, 0, 1));
-    frame.projection = glm::perspective(glm::radians(76.0f), aspect, .08f, 160.0f);
-    frame.projection[1][1] *= -1;
-    return frame;
+uint32_t Game::decision() const {
+    return player.stage + (player.branch >= 0 ? 1u : 0u);
 }
 bool Game::approachingJunction() const {
-    float y = player.feet.y - player.stage * STAGE_LENGTH;
-    return y >= 6 && y < 40 && player.branch < 0 && !player.won && player.respawnTime <= 0;
+    return !player.title && !player.dead;
 }
 prediction::Request Game::request(uint32_t id, uint32_t rollouts) const {
     prediction::Request r;
     r.id = id;
     r.run = player.run;
-    r.junction = player.stage;
-    r.progressMm = int32_t((player.feet.y - player.stage * STAGE_LENGTH - ROUTE_START) * 1000);
-    r.budgetTicks = uint32_t(std::max(0.0f, player.deadline) * 30);
-    r.worldTick = uint32_t(player.worldTime * 30);
+    r.junction = decision();
+    r.xMm = int(std::round(player.localX * 1000));
+    r.velocity = std::clamp(int(std::round(player.lateralSpeed * 1000 / 60)), -200, 200);
+    r.worldTick = unsigned(player.worldTime * 60);
     r.rollouts = rollouts;
-    // Keep seed fixed across refreshes so small timing changes don't add display noise.
-    r.seed = 12345u ^ (player.stage * 0x9e3779b9u);
+    r.routeCount = prediction::choices(data, r.junction);
+    r.seed = 12345u ^ (r.junction * 0x9e3779b9u);
     return r;
 }
+FrameTransforms Game::transforms(float aspect) const {
+    // Camera looks down the shaft. Geometry is rebased around the player each
+    // frame so long runs don't lose small-scale precision.
+    float roll = std::clamp(-player.lateralSpeed * .008f, -.10f, .10f);
+    glm::vec3 eye(player.feet.x, 0, 0), up(std::sin(roll), 0, std::cos(roll));
+    FrameTransforms frame;
+    frame.view = glm::lookAt(eye, eye + glm::vec3(0, 1, 0), up);
+    frame.projection =
+        glm::perspective(glm::radians(std::min(103.0f, 84.0f + player.elapsed * .15f)), aspect,
+                         .08f, std::max(220.0f, player.speed * 8));
+    frame.projection[1][1] *= -1;
+    return frame;
+}
 int Game::score() const {
-    return int(player.feet.y * 10) + int(player.stage) * 1000 -
-           (player.won ? int(player.elapsed * 5) : 0);
+    return int(player.elapsed * 100);
 }
 
-void Game::scene(std::vector<SceneInstance> &scene, const Hud &hud) const {
+void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) const {
     scene.clear();
-    for (const auto &box : boxes)
-        object(scene, box.center, box.half * 2.0f, box.color);
-    const uint32_t tick = uint32_t(player.worldTime * 30);
-    for (unsigned stage = 0; stage < prediction::STAGES; ++stage)
-        for (unsigned branch = 0; branch < 2; ++branch) {
-            const auto &route = data.routes[stage * 2 + branch];
-            float x = branch ? 8.0f : -8.0f, base = stage * STAGE_LENGTH + ROUTE_START;
-            if (route.hurdleMm)
-                object(scene, {x, base + route.hurdleMm * .001f, .225f}, {5, .35f, .45f}, orange);
-            const bool active = prediction::gateActive(route, tick),
-                       warning = prediction::gateWarning(route, tick);
-            const auto color = active    ? glm::vec3(1, .12f, .17f)
-                               : warning ? glm::vec3(1, .7f, .07f)
-                                         : mint;
-            object(scene, {x, base + route.gateMm * .001f, active ? 1.5f : 2.85f},
-                   {5, .35f, active ? 3.0f : .18f}, color);
-            // Floating route beacons above the fork, updated only for current guidance.
-            auto beacon = branch ? blue : orange;
-            if (stage == player.stage && hud.guidance && hud.valid)
-                beacon = hud.recommended == int(branch) ? mint : glm::vec3(.65f, .16f, .2f);
-            object(scene, {x, stage * STAGE_LENGTH + 38, 3.3f}, {3, .3f, .25f}, beacon);
+    const unsigned first = player.stage ? player.stage - 1 : 0;
+    const unsigned target = decision();
+    const float origin = player.feet.y;
+    for (unsigned stage = first; stage <= player.stage + 2; ++stage) {
+        float start = stage * SECTION_SECONDS;
+        float entry = float(prediction::ENTRY_TICK) / prediction::TICKS_PER_SECOND;
+        float y0 = distanceAt(start) - origin, yEntry = distanceAt(start + entry) - origin;
+        float yMerge = distanceAt(start + SECTION_SECONDS * .82f) - origin,
+              yEnd = distanceAt(start + SECTION_SECONDS) - origin;
+        auto count = prediction::choices(data, stage);
+        // Apothem -> 8.0 m circumradius, matching the common-shaft collision limit.
+        tube(scene, 0, 0, y0, yEntry, 7.4f, {.027f, .03f, .055f});
+        tube(scene, 0, 0, yMerge, yEnd, 7.4f, {.025f, .028f, .047f});
+        ring(scene, 0, y0, 7.4f, .09f, {.04f, .09f, .18f});
+        // A dark bulkhead with 2..4 octagonal mouths, not a HUD route selector.
+        object(scene, {0, yEntry, 5.0f}, {16, .45f, 6.2f}, {.018f, .02f, .032f});
+        object(scene, {0, yEntry, -5.0f}, {16, .45f, 6.2f}, {.018f, .02f, .032f});
+        float outer = float(count - 1) * 2 + 1.85f;
+        for (int side : {-1, 1})
+            object(scene, {side * (outer + (8 - outer) * .5f), yEntry, 0},
+                   {std::max(.01f, 8 - outer), .45f, 3.8f}, {.018f, .02f, .032f});
+        for (unsigned divider = 0; divider + 1 < count; ++divider) {
+            float x = (prediction::laneCenter(count, divider) +
+                       prediction::laneCenter(count, divider + 1)) *
+                      .0005f;
+            object(scene, {x, yEntry, 0}, {.30f, .5f, 3.8f}, {.025f, .02f, .04f});
         }
-    float wallY = std::max(player.stage * STAGE_LENGTH - 4, player.feet.y - player.deadline * 1.2f);
-    object(scene, {0, wallY, 2.5f}, {25, .3f, 6}, {.7f, .05f, .3f});
-
-    const glm::vec3 white(.9f, .95f, 1), muted(.55f, .66f, .75f), panel(.025f, .045f, .075f);
-    rectangle(scene, 16, 16, 1248, 74, panel);
-    text(scene, 32, 28, "DEADLINE / RUNNER", 3, white);
-    text(scene, 32, 62,
-         "SECTOR " + std::to_string(player.stage + 1) + "/3  SCORE " + std::to_string(score()), 2,
-         muted);
-    text(scene, 780, 28,
-         "PURSUIT " + std::to_string(std::max(0, int(std::ceil(player.deadline)))) + "S", 3,
-         player.deadline < 6 ? orange : mint);
-    rectangle(scene, 780, 61, 450, 10, {.13f, .17f, .22f});
-    rectangle(scene, 780, 61, 450 * std::clamp(player.deadline / 22, 0.0f, 1.0f), 10,
-              player.deadline < 6 ? orange : mint);
-    rectangle(scene, 16, 638, 1248, 66, panel);
-    text(scene, 32, 650, "WASD MOVE  MOUSE LOOK  SPACE JUMP  R RESTART  ESC PAUSE", 2, white);
-    text(scene, 32, 677,
-         std::string("F1 ") + (hud.gpu ? "GPU" : "CPU") + "  F2 GUIDANCE " +
-             (hud.guidance ? "ON" : "OFF") + "  F3 STATS",
-         2, mint);
-    rectangle(scene, 637, 355, 6, 2, white);
-    rectangle(scene, 639, 353, 2, 6, white);
-    if (approachingJunction() && hud.guidance) {
-        for (int branch = 0; branch < 2; ++branch) {
-            float x = branch ? 846 : 24;
-            auto color = branch ? blue : orange;
-            rectangle(scene, x, 126, 410, 114, panel);
-            if (hud.valid && hud.recommended == branch)
-                rectangle(scene, x, 126, 410, 5, mint);
-            text(scene, x + 14, 143, branch ? "RIGHT / BLUE" : "LEFT / ORANGE", 3, color);
-            std::string label =
-                hud.valid
-                    ? std::to_string(int(std::round(hud.percentages[branch] * 100))) + "% SURVIVE"
-                    : "SCANNING...";
-            text(scene, x + 14, 179, label, 3, hud.valid ? white : muted);
-            text(scene, x + 14, 214, branch ? "SLOWER / SMALLER GAP" : "FASTER / HARDER JUMPS", 2,
-                 muted);
+        for (unsigned choice = 0; choice < count; ++choice) {
+            float x = prediction::laneCenter(count, choice) * .001f;
+            auto rim = glm::vec3(.08f, .18f, .35f);
+            if (stage == target && guidance.enabled && guidance.valid) {
+                float probability = guidance.percentages[choice];
+                rim = probability < .1f   ? red
+                      : probability < .6f ? glm::vec3(.9f, .32f, .06f)
+                                          : cyan;
+                if (guidance.recommended == int(choice))
+                    rim = glm::vec3(.15f, .95f, .55f);
+            }
+            // 1.71 m apothem -> 1.85 m circumradius; leave the player-radius margin.
+            tube(scene, x, x, yEntry, yMerge, 1.71f, {.022f, .026f, .046f});
+            ring(scene, x, yEntry - .25f, 1.71f, .12f, rim);
+            for (int band = 1; band < 5; ++band) {
+                float t = float(band) / 5;
+                ring(scene, x, yEntry + (yMerge - yEntry) * t, 1.71f, .055f, {.035f, .06f, .12f});
+            }
+            const auto &route = prediction::route(data, stage, choice);
+            for (unsigned event = 0; event < 2; ++event) {
+                const auto &o = route.obstacles[event];
+                const auto pose = prediction::pose(o, unsigned(player.worldTime * 60));
+                float y = distanceAt(start + float(prediction::HAZARD_TICKS[event]) / 60) - origin;
+                float eventTime = start + float(prediction::HAZARD_TICKS[event]) / 60;
+                float depth = distanceAt(eventTime + .05f) - distanceAt(eventTime - .05f);
+                float cx = x + pose.center * .001f;
+                if (o.kind == 0) {
+                    SceneInstance spike;
+                    spike.transform =
+                        glm::translate(glm::mat4(1), {cx, y, (o.flags & 1u) ? 1.1f : -1.1f});
+                    if (o.flags & 1u)
+                        spike.transform =
+                            glm::rotate(spike.transform, glm::radians(180.0f), glm::vec3(0, 1, 0));
+                    spike.transform = glm::scale(spike.transform, {o.extent * .002f, depth, 3});
+                    spike.tint = glm::vec4(red, 2);
+                    scene.push_back(spike);
+                } else if (o.kind == 1)
+                    object(scene, {cx, y, 0}, {o.extent * .002f, depth, 3.7f}, {.95f, .2f, .055f});
+                else if (o.kind == 2) {
+                    SceneInstance blade;
+                    float c = pose.cosine / 1024.0f, s = pose.sine / 1024.0f;
+                    blade.transform[0] =
+                        glm::vec4(c * o.extent * .002f, 0, s * o.extent * .002f, 0);
+                    blade.transform[1] = glm::vec4(0, depth, 0, 0);
+                    blade.transform[2] = glm::vec4(-s * .42f, 0, c * .42f, 0);
+                    blade.transform[3] = glm::vec4(cx, y, 0, 1);
+                    blade.tint = glm::vec4(red, 1);
+                    scene.push_back(blade);
+                    object(scene, {cx, y - depth * .5f - .02f, 0}, {.16f, .05f, .16f},
+                           {1, .5f, .1f}, 3);
+                } else {
+                    float gap = pose.aperture * .001f;
+                    for (int side : {-1, 1}) {
+                        float width = std::max(.01f, 1.85f - gap);
+                        object(scene, {cx + side * (gap + width * .5f), y, 0}, {width, depth, 3.7f},
+                               {.55f, .035f, .2f});
+                        object(scene, {cx + side * gap, y - depth * .5f - .02f, 0},
+                               {.07f, .04f, 3.7f}, red, 3);
+                    }
+                }
+            }
+            if (stage == target && guidance.enabled && !player.title) {
+                std::string label =
+                    guidance.valid
+                        ? std::to_string(int(std::round(guidance.percentages[choice] * 100))) + "%"
+                        : "...";
+                worldText(scene, {x, yEntry - .8f, 2.6f}, label, .105f,
+                          guidance.valid ? rim : glm::vec3(.15f, .25f, .4f));
+            }
         }
-        text(scene, 430, 262, "MODEL ESTIMATE / NEXT 8S", 2, muted);
     }
-    if (hud.stats) {
-        rectangle(scene, 20, 370, 530, 118, panel);
-        text(scene, 32, 382,
-             "FRAME " + std::to_string(int(hud.frameMs)) + "MS P95 " +
-                 std::to_string(int(hud.p95Ms)) + "MS",
-             2, white);
-        text(scene, 32, 408,
-             "PRED " + std::to_string(int(hud.predictionMs * 1000)) + "US GPU " +
-                 std::to_string(int(hud.kernelMs * 1000)) + "US",
-             2, mint);
-        text(scene, 32, 434, "ROLLOUTS " + std::to_string(hud.rollouts) + " HORIZON 240 TICKS", 2,
-             muted);
-        text(scene, 32, 460, "WIRE: COURSE 288B REQUEST 48B RESULT 32B", 2, muted);
+    // Sparse streaks emphasize acceleration without particle buffers or effects.
+    for (int index = 0; index < 20; ++index) {
+        float angle = index * 2.399963f;
+        float y = std::fmod(index * 13.7f - player.feet.y, 95.0f);
+        if (y < 0)
+            y += 95;
+        object(scene, {std::cos(angle) * 7.35f, y, std::sin(angle) * 7.35f},
+               {.025f, std::min(3.5f, player.speed * .07f), .025f}, {.045f, .14f, .2f}, 3);
     }
-    if (player.stage > 0 && player.feet.y - player.stage * STAGE_LENGTH < 12 &&
-        player.respawnTime <= 0)
-        text(scene, 460, 300, "CHECKPOINT SAVED", 3, mint);
-    if (player.elapsed < 4 && player.respawnTime <= 0) {
-        rectangle(scene, 300, 340, 680, 188, panel);
-        text(scene, 325, 359, "KEEP MOVING. CHOOSE A ROUTE.", 3, white);
-        text(scene, 325, 399, "JUMP GAPS AND ORANGE BEAMS", 3, orange);
-        text(scene, 325, 439, "RED GATE KILLS. GREEN IS SAFE.", 3, mint);
-        text(scene, 325, 486, "REACH EACH CHECKPOINT BEFORE PURSUIT", 2, muted);
-    }
-    if (player.respawnTime > 0 || player.won || hud.paused) {
-        rectangle(scene, 200, 302, 880, 205, panel);
-        const std::string title = player.won   ? "YOU SURVIVED"
-                                  : hud.paused ? "PAUSED"
-                                               : "RUN INTERRUPTED";
-        text(scene, 250, 328, title, 5, player.won ? mint : white);
-        text(scene, 250, 390,
-             player.won   ? "SCORE " + std::to_string(score()) + "  TIME " +
-                                std::to_string(int(player.elapsed)) + "S"
-             : hud.paused ? "ESC RESUME / CLOSE WINDOW TO QUIT"
-                          : player.deathReason,
-             3, orange);
-        text(scene, 250, 450,
-             player.won   ? "R TO RUN AGAIN"
-             : hud.paused ? "F1 BACKEND / F2 GUIDANCE / F3 STATS"
-                          : "RESTARTING FROM CHECKPOINT...",
-             2, muted);
+    // No gameplay HUD, score panel, crosshair or screen-space probabilities.
+    if (player.title || player.dead || guidance.paused) {
+        rectangle(scene, 245, 190, 790, 340, {.008f, .012f, .023f});
+        rectangle(scene, 245, 190, 790, 3, player.dead ? red : cyan);
+        screenText(scene, 300, 225, player.dead ? "SHATTERED" : "VOID / DIVE", 7,
+                   player.dead ? red : white);
+        if (player.dead) {
+            screenText(scene, 300, 315, player.deathReason, 3, violet);
+            screenText(scene, 300, 360,
+                       seconds(player.elapsed) + " SECONDS / " + std::to_string(player.stage) +
+                           " FORKS",
+                       3, white);
+            screenText(scene, 300, 405, "BEST " + seconds(player.best) + " SECONDS", 3, cyan);
+            screenText(scene, 300, 470, "SPACE TO DIVE AGAIN", 3, white);
+        } else if (guidance.paused) {
+            screenText(scene, 300, 330, "PAUSED", 4, violet);
+            screenText(scene, 300, 420, "ESC TO KEEP FALLING", 3, white);
+        } else {
+            screenText(scene, 300, 315, "A/D OR MOUSE: STEER", 3, cyan);
+            screenText(scene, 300, 355, "NO BRAKES. PICK A TUNNEL.", 3, white);
+            screenText(scene, 300, 400, "NUMBERS ARE MODEL ESTIMATES", 2, violet);
+            screenText(scene, 300, 470, "SPACE TO DIVE", 4, white);
+        }
     }
 }
-
 GameControls Autopilot::sample(const Game &game) {
     const auto &p = game.state();
-    if (run != p.run || stage != p.stage) {
-        waypoint = 0;
-        run = p.run;
-        stage = p.stage;
-    }
     GameControls controls;
-    if (p.respawnTime > 0 || p.won)
+    if (p.title || p.dead) {
+        controls.jump = true;
         return controls;
-    const unsigned choice = (pattern >> p.stage) & 1u;
-    const float lane = choice ? 8.0f : -8.0f;
-    const glm::vec2 targets[] = {{0, 26}, {lane, 35}, {lane, 99}, {0, 109}, {0, 114.4f}};
-    glm::vec2 target = targets[std::min(waypoint, 4u)] + glm::vec2(0, p.stage * STAGE_LENGTH);
-    glm::vec2 delta = target - glm::vec2(p.feet);
-    if (glm::length(delta) < .45f && waypoint < 4) {
-        ++waypoint;
-        target = targets[waypoint] + glm::vec2(0, p.stage * STAGE_LENGTH);
-        delta = target - glm::vec2(p.feet);
     }
-    if (glm::length(delta) > .01f) {
-        delta = glm::normalize(delta);
-        const float yaw = glm::radians(p.yaw);
-        controls.strafe = glm::dot(delta, glm::vec2(std::cos(yaw), -std::sin(yaw)));
-        controls.forward = glm::dot(delta, glm::vec2(std::sin(yaw), std::cos(yaw)));
+    if (run != p.run)
+        run = p.run;
+    int target = 0;
+    if (p.branch < 0) {
+        auto count = prediction::choices(game.course(), p.stage);
+        // Choose the best modeled option once per section without peeking at any
+        // game RNG. Prefer the guaranteed-clear center line for the test driver.
+        for (unsigned c = 0; c < count; ++c) {
+            const auto &route = prediction::route(game.course(), p.stage, c);
+            if (route.obstacles[0].kind == 0 && route.obstacles[0].offset == -1100 &&
+                route.obstacles[1].kind == 0 && route.obstacles[1].offset == 1100) {
+                target = prediction::laneCenter(count, c);
+                break;
+            }
+        }
     }
-    const auto &route = game.course().routes[p.stage * 2 + choice];
-    float progress = p.feet.y - p.stage * STAGE_LENGTH - ROUTE_START;
-    float gapDistance = route.gapStart * .001f - progress;
-    if (gapDistance > 0 && gapDistance < 1.6f && p.grounded)
-        controls.jump = true;
-    const float beamDistance = route.hurdleMm * .001f - progress;
-    if (route.hurdleMm && beamDistance > 0 && beamDistance < 1.6f && p.grounded)
-        controls.jump = true;
-    float gateDistance = route.gateMm * .001f - progress;
-    uint32_t tick = uint32_t(p.worldTime * 30);
-    if (gateDistance > 0 && gateDistance < 2.2f &&
-        (prediction::gateActive(route, tick) || prediction::gateWarning(route, tick)))
-        controls.forward = controls.strafe = 0;
+    float desired = std::clamp((target * .001f - p.localX) * 8.0f, -12.0f, 12.0f);
+    controls.strafe = desired / 12;
+    // When centered, avoid the mouse controller retaining a prior extreme target.
+    if (std::abs(controls.strafe) < .011f)
+        controls.strafe = 0;
     return controls;
 }
-
 void selfTest() {
     auto course = prediction::makeCourse();
+    bool counts[5] = {};
+    bool kinds[4] = {};
+    for (unsigned stage = 0; stage < 32; ++stage) {
+        counts[prediction::choices(course, stage)] = true;
+        for (unsigned c = 0; c < prediction::choices(course, stage); ++c)
+            for (const auto &o : prediction::route(course, stage, c).obstacles)
+                kinds[o.kind] = true;
+    }
+    for (unsigned count = 2; count <= 4; ++count)
+        if (!counts[count])
+            throw std::runtime_error("missing fork count");
+    for (bool present : kinds)
+        if (!present)
+            throw std::runtime_error("missing obstacle kind");
     Game game(course);
     Autopilot bot;
-    for (int i = 0; i < 120 * 80 && !game.state().won; ++i)
+    for (int tick = 0; tick < 120 * 80 && game.state().stage < 20; ++tick)
         game.step(bot.sample(game), 1.0f / 120);
-    if (!game.state().won || game.state().deaths)
-        throw std::runtime_error("autopilot cannot finish course without dying");
-    std::cout << "PASS playable course: 3 junctions, 2 checkpoints, " << game.state().elapsed
-              << " simulated seconds\n";
-    for (unsigned pattern = 0; pattern < 8; ++pattern) {
-        Game test(course);
-        Autopilot routes(pattern);
-        for (int tick = 0; tick < 120 * 80 && !test.state().won; ++tick)
-            test.step(routes.sample(test), 1.0f / 120);
-        if (!test.state().won || test.state().deaths)
-            throw std::runtime_error("untraversable route combination " + std::to_string(pattern));
+    if (game.state().stage < 20 || game.state().dead || game.state().deaths)
+        throw std::runtime_error("viable tunnel sequence cannot be steered");
+    if (game.state().speed <= INITIAL_SPEED + 20)
+        throw std::runtime_error("forward speed not increasing");
+    std::cout << "PASS forced-forward acceleration and 20 forks at 2.4 seconds each\n";
+    std::cout << "PASS seeded 2/3/4-way forks and all four obstacle kinds\n";
+    Game noBrake(course);
+    noBrake.restart();
+    GameControls backwards;
+    backwards.forward = -1;
+    for (int tick = 0; tick < 60; ++tick)
+        noBrake.step(backwards, 1.0f / 120);
+    if (noBrake.state().feet.y < 8)
+        throw std::runtime_error("backward input brakes falling");
+    for (int tick = 0; tick < 80; ++tick)
+        noBrake.step(backwards, 1.0f / 120);
+    if (!noBrake.state().dead)
+        throw std::runtime_error("missing a fork is not lethal");
+    prediction::Obstacle sealed{3, 0, 7, 0, 0, 90, 0, 60};
+    for (int x = -1600; x <= 1600; x += 100)
+        for (unsigned tick = 0; tick < 128; tick += 8)
+            if (!prediction::blocked(sealed, x, tick))
+                throw std::runtime_error("sealed path not lethal");
+    prediction::Request r;
+    r.routeCount = prediction::choices(course, 0);
+    auto a = prediction::evaluate(course, r), b = prediction::evaluate(course, r);
+    if (!prediction::sameResults(a, b))
+        throw std::runtime_error("rollout nondeterministic");
+    int impossible = 0;
+    for (unsigned stage = 0; stage < 16; ++stage) {
+        r.junction = stage;
+        r.worldTick = stage * 144;
+        r.routeCount = prediction::choices(course, stage);
+        auto result = prediction::evaluate(course, r);
+        bool anyViable = false;
+        for (unsigned c = 0; c < r.routeCount; ++c) {
+            if (prediction::survival(result, c) > .2f)
+                anyViable = true;
+            if (result.routes[c].survived == 0)
+                ++impossible;
+        }
+        if (!anyViable)
+            throw std::runtime_error("predictor finds no viable opening");
     }
-    std::cout << "PASS all eight route combinations without deaths\n";
-    game.restart();
-    for (int i = 0; i < 120 * 23; ++i)
-        game.step({}, 1.0f / 120);
-    if (game.state().deaths != 1)
-        throw std::runtime_error("pursuit/restart failed");
-    std::cout << "PASS pursuit, death and checkpoint restart\n";
-    Game pitchA(course), pitchB(course);
-    pitchB.look(0, -700);
-    GameControls forward;
-    forward.forward = 1;
-    for (int i = 0; i < 120; ++i) {
-        pitchA.step(forward, 1.0f / 120);
-        pitchB.step(forward, 1.0f / 120);
-    }
-    if (glm::length(pitchA.state().feet - pitchB.state().feet) > .001f)
-        throw std::runtime_error("camera pitch changes movement");
-    std::cout << "PASS horizontal movement independent of mouse pitch\n";
-    prediction::Request request;
-    request.progressMm = -10000;
-    const auto first = prediction::evaluate(course, request),
-               second = prediction::evaluate(course, request);
-    if (!prediction::sameResults(first, second))
-        throw std::runtime_error("prediction nondeterministic");
-    request.budgetTicks = 0;
-    auto doomed = prediction::evaluate(course, request);
-    if (doomed.routes[0].survived || doomed.routes[1].survived)
-        throw std::runtime_error("expired pursuit survives");
-    auto safe = course;
-    for (auto &route : safe.routes) {
-        route.gapStart = route.gapEnd = route.hurdleMm = route.gateMm = 0;
-        route.jumpFailure = 0;
-    }
-    request.budgetTicks = 660;
-    auto clear = prediction::evaluate(safe, request);
-    if (clear.routes[0].survived != request.rollouts ||
-        clear.routes[1].survived != request.rollouts)
-        throw std::runtime_error("clear route not safe");
-    std::cout << "PASS deterministic rollouts, expired deadline and clear routes\n";
-    int leftWins = 0, rightWins = 0;
-    for (uint32_t tick = 0; tick < 900; tick += 15) {
-        prediction::Request decision;
-        decision.progressMm = 7000;
-        decision.worldTick = tick;
-        auto result = prediction::evaluate(course, decision);
-        if (prediction::survival(result, 0) > prediction::survival(result, 1) + .05f)
-            ++leftWins;
-        if (prediction::survival(result, 1) > prediction::survival(result, 0) + .05f)
-            ++rightWins;
-    }
-    if (!leftWins || !rightWins)
-        throw std::runtime_error("hazard timing never changes a meaningful route recommendation");
-    std::cout << "PASS hazard-dependent recommendations: left favored " << leftWins
-              << ", right favored " << rightWins << " sampled states\n";
-    prediction::Request freshness;
-    freshness.run = 3;
-    freshness.junction = 1;
-    freshness.worldTick = 100;
-    if (!prediction::applies(freshness, 3, 1, 110) || prediction::applies(freshness, 4, 1, 110) ||
-        prediction::applies(freshness, 3, 2, 110) || prediction::applies(freshness, 3, 1, 140) ||
-        prediction::applies(freshness, 3, 1, 90))
-        throw std::runtime_error("stale guidance accepted");
-    freshness.courseVersion++;
-    if (prediction::applies(freshness, 3, 1, 110))
-        throw std::runtime_error("old course result accepted");
-    std::cout << "PASS result freshness: run, junction, course, age and future-tick rejection\n";
+    if (!impossible)
+        throw std::runtime_error("no genuinely impossible choices");
+    std::cout << "PASS geometric rollout survival, impossible choices and deterministic streams\n";
+    r.run = 4;
+    r.junction = 0;
+    r.worldTick = 10;
+    if (!prediction::applies(r, 4, 0, 20) || prediction::applies(r, 5, 0, 20) ||
+        prediction::applies(r, 4, 1, 20) || prediction::applies(r, 4, 0, 45))
+        throw std::runtime_error("stale result accepted");
+    std::cout << "PASS stale run/junction/age rejection\n";
 }
 } // namespace survival

@@ -117,7 +117,7 @@ class GpuPrediction::Impl {
         vkGetPhysicalDeviceProperties(context.physical, &properties);
         if (properties.limits.maxComputeWorkGroupInvocations < 64 ||
             properties.limits.maxComputeWorkGroupSize[0] < 64 ||
-            properties.limits.maxComputeWorkGroupCount[1] < 2 ||
+            properties.limits.maxComputeWorkGroupCount[1] < prediction::CHOICES ||
             properties.limits.maxPushConstantsSize < sizeof(request)) {
             throw std::runtime_error("GPU lacks prediction limits");
         }
@@ -143,11 +143,12 @@ class GpuPrediction::Impl {
         allocate(courseBuffer, sizeof(course),
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        allocate(output, 2 * sizeof(prediction::Summary),
+        allocate(output, prediction::CHOICES * sizeof(prediction::Summary),
                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        allocate(readback, 2 * sizeof(prediction::Summary), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        allocate(readback, prediction::CHOICES * sizeof(prediction::Summary),
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         Buffer staging;
         try {
@@ -201,8 +202,9 @@ class GpuPrediction::Impl {
         setInfo.pSetLayouts = &setLayout;
         check(vkAllocateDescriptorSets(context.device, &setInfo, &set),
               "prediction descriptor set");
-        VkDescriptorBufferInfo buffers[] = {{courseBuffer.handle, 0, sizeof(course)},
-                                            {output.handle, 0, 2 * sizeof(prediction::Summary)}};
+        VkDescriptorBufferInfo buffers[] = {
+            {courseBuffer.handle, 0, sizeof(course)},
+            {output.handle, 0, prediction::CHOICES * sizeof(prediction::Summary)}};
         VkWriteDescriptorSet writes[2]{};
         for (uint32_t i = 0; i < 2; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -261,7 +263,8 @@ class GpuPrediction::Impl {
         check(vkResetCommandBuffer(commands, 0), "prediction command reset");
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         check(vkBeginCommandBuffer(commands, &begin), "prediction begin");
-        vkCmdFillBuffer(commands, output.handle, 0, 2 * sizeof(prediction::Summary), 0);
+        vkCmdFillBuffer(commands, output.handle, 0,
+                        prediction::CHOICES * sizeof(prediction::Summary), 0);
         VkMemoryBarrier clear{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         clear.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         clear.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -277,7 +280,7 @@ class GpuPrediction::Impl {
                                 &set, 0, nullptr);
         vkCmdPushConstants(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                            sizeof(request), &request);
-        vkCmdDispatch(commands, (request.rollouts + 63) / 64, 2, 1);
+        vkCmdDispatch(commands, (request.rollouts + 63) / 64, request.routeCount, 1);
         if (queries)
             vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queries, 1);
         VkMemoryBarrier transfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -286,7 +289,7 @@ class GpuPrediction::Impl {
         vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &transfer, 0, nullptr, 0,
                              nullptr);
-        VkBufferCopy copy{0, 0, 2 * sizeof(prediction::Summary)};
+        VkBufferCopy copy{0, 0, prediction::CHOICES * sizeof(prediction::Summary)};
         vkCmdCopyBuffer(commands, output.handle, readback.handle, 1, &copy);
         VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -310,7 +313,8 @@ class GpuPrediction::Impl {
         check(status, "prediction completion");
         result = {};
         result.request = request;
-        std::memcpy(result.routes.data(), readback.mapped, 2 * sizeof(prediction::Summary));
+        std::memcpy(result.routes.data(), readback.mapped,
+                    prediction::CHOICES * sizeof(prediction::Summary));
         result.latencyMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                 .count();
