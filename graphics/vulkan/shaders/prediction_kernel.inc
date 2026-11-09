@@ -10,10 +10,11 @@ RolloutResult rollout(COURSE_PARAM Request request,uint choice,uint number) {
     Route route=course.routes[(request.junction & 31u)*4u+choice];
     uint start=sectionStartTick(request.junction),end=start+sectionTicks(request.junction);
     uint events=obstacleCount(request.junction);
+    uint entry=start+entryTick(request.junction),halfWindow=contactTicks(request.junction);
     uint tick=max(start,request.worldTick);
     int x=request.xMm,z=request.zMm,velocity=request.velocity,vz=request.verticalVelocity;
     int center=laneCenter(route.choiceCount,choice);
-    bool inside=tick>=start+TUNNEL_ENTRY_TICK;
+    bool inside=tick>=entry;
     if(inside) x-=center;
     rng=randomNext(rng);
     uint reaction=route.reactionTicks+(rng&7u);
@@ -31,7 +32,7 @@ RolloutResult rollout(COURSE_PARAM Request request,uint choice,uint number) {
                 uint arrival=start+hazardTick(request.junction,event);
                 int uncertainty=int((rng>>16u)&7u)-3;
                 uint predicted=uint(max(0,int(arrival)+uncertainty));
-                if(event<events) target=steeringTarget(route,x,z,predicted,event);
+                if(event<events) target=steeringTarget(route,x,z,predicted,event,halfWindow);
                 else {target.x=0;target.z=0;}
             }
             int noise=(int(rng&255u)-128)*int(route.lateralNoise)/128;
@@ -49,16 +50,16 @@ RolloutResult rollout(COURSE_PARAM Request request,uint choice,uint number) {
         x+=velocity;
         z+=vz;
         ++result.progress;
-        if(!inside && tick>=start+TUNNEL_ENTRY_TICK) {
+        if(!inside && tick>=entry) {
             x-=center;inside=true;reaction=0u;
         }
         if(inside && tick<start+mergeTick(request.junction) &&
            !withinTube(x,z,TUNNEL_LOCAL_LIMIT)) return result;
         if(!withinTube(inside?x+center:x,z,TUNNEL_SHAFT_LIMIT)) return result;
         uint arrival=start+hazardTick(request.junction,event);
-        if(event<events && tick>=arrival-3u) {
+        if(event<events && tick>=arrival-halfWindow) {
             if(blocked(route.obstacles[event],x,z,tick)) return result;
-            if(tick>=arrival+3u) {++event;reaction=0u;}
+            if(tick>=arrival+halfWindow) {++event;reaction=0u;}
         }
     }
     result.survived=tick>=end?1u:0u;

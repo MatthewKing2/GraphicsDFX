@@ -26,24 +26,29 @@ obstacles and steering speed scaled to match. Movement is in the full horizontal
 vertical cross-section, with octagonal wall collision. Rotating blades can be
 passed above/below; crushers have four visible edges, not invisible vertical walls.
 
-There are **six seconds before each entrance** (previously three) to move between
-openings and compare their live probabilities. The passage itself starts at about
-4.3 seconds and grows by half a second per section toward 12.3 seconds, followed
-by a 0.73-second common-shaft exit. Total sections grow from 11 to 19 seconds.
-Early passages have four hazards; this grows to ten. Length is capped after
-sixteen sections. Forward speed still starts at 18 units/second and rises by 1.2
-every second. The first fork has two openings; later forks have 2-4.
+Forward speed now starts at **27 units/second** (1.5x the previous start) and gains
+**9 units/second every second** (previously 1.2), reaching **567 at 60 seconds**.
+The first section still gives six seconds to compare openings and a roughly
+4.3-second passage. Reaction windows then tighten: total sections shrink from
+11 to 2.2 seconds, and the entrance window drops to 0.3 seconds around one minute.
+Simply increasing speed previously stretched the geometry without shortening
+reaction time; this authored pacing ramp makes the late game genuinely difficult.
+There is no forced 60-second death timer; survival still depends on input/course.
+Early passages have four hazards; this grows to ten. The first fork has two
+openings; later forks have 2-4.
 Collision kills immediately. Both steering axes preserve position, mouse targets
 and velocity at exits: no automatic drift, snap, or recentering.
 
 Passage walls are warm plum, the open shaft is cool blue, and an amber rim marks
 each exit. This keeps the dark low-poly style while making the transition visible.
+Eight solid triangular-prism fillers per mouth close the space between its square
+bulkhead cutout and the actual octagonal tunnel. No see-through square corners.
 
 The first sections have small blocks, slow blades, and wide crusher gaps. Over
 the first twelve sections, obstacles grow, gaps narrow and motion speeds up.
 Impossible openings start only after the opening three sections. This is an
-authored difficulty/length ramp alongside acceleration, not fixed-length tunnels
-that get shorter in time as speed rises. Physical lengths grow with forward speed.
+authored difficulty/timing ramp alongside acceleration, not a claim of constant
+physical tunnel length. Physical lengths follow the accelerated distance curve.
 
 No gameplay HUD, crosshair, or fixed probability panels. Percentages float in world
 space above the upcoming openings. Green outlines mark the preferred estimate;
@@ -54,9 +59,11 @@ text, and sparse speed streaks.
 Red spikes are triangular prisms. Rectangles slide, spin CW/CCW, or reverse
 direction. Crusher edges narrow a passage. Collision is checked throughout each
 obstacle's visible forward depth, not just at one central plane. That depth spans
-a 0.1-second contact window as speed increases.
+a 0.1-second contact window initially, shrinking to about 0.033 seconds as hazards
+pack closer together. Rendering and both predictors share the same contact ticks.
 
-At least one route has a viable center line. Others can be genuinely impossible:
+At least one route has a clear center line, but reaching it in time is not
+guaranteed late in a run. Others can be genuinely impossible:
 their aperture is smaller than the player. Such probabilities are computed from
 collision, not manually forced to zero. There are no checkpoints or finish line;
 survival time is the score.
@@ -168,7 +175,7 @@ No RTL, driver, FPGA resource/timing result, or measured FPGA power is included.
 ## Memory, PCIe and the success criterion
 
 - Course: **43,008 bytes**, uploaded once and resident (32 sections x four slots,
-  ten 32-byte obstacle slots plus a 16-byte header per route; course version 4).
+  ten 32-byte obstacle slots plus a 16-byte header per route; course version 5).
 - Request: **64 bytes**, including IDs, section, two-axis state, clock and seed.
 - Result payload: **64 bytes**, four summaries; unused choice slots stay zero.
 
@@ -299,8 +306,9 @@ From the repository root:
 .\graphics\vulkan\tests\game-checks.ps1 -Benchmark -NBody
 ```
 
-Checks cover 20 consecutive growing tunnels, per-tick two-axis continuity including
-moving exits, W/S and mouse vertical movement, blade escape, octagonal wall corners,
+Checks cover six opening tunnels, a seeded test pilot challenged near one minute,
+solid octagonal mouth coverage, per-tick two-axis continuity including moving exits,
+W/S and mouse vertical movement, blade escape, octagonal wall corners,
 live-position probability changes, acceleration/no braking, 2/3/4 choices,
 all obstacle kinds, impossible routes, deterministic streams, stale results, and
 48 exact CPU/GPU comparisons including partial workgroups and course wrapping.
@@ -319,7 +327,21 @@ Intentional rough edges: no audio, repeated 32-section course, flat geometry and
 a coarse, uncalibrated steering model. Next: playtest steering, decision timing,
 and obstacle readability rather than build a bigger engine.
 
-## Wide two-axis gameplay check (course version 4)
+## One-minute pacing check (course version 5)
+
+CPU tests passed six opening sections with moving exit continuity; the seeded,
+perfect-course-knowledge test pilot then crashed at 60.56 seconds. This is a
+regression check for the ramp, not a measured human survival-time distribution.
+An 81-point aperture test checks that the mouth fillers cover corners without
+blocking the octagon. The shared timing checks prevent overlapping hazard contact
+windows as the course accelerates. Previous version timing benchmarks below are
+historical, not measurements of this new pacing.
+Both rendered backends passed the six-section opening playthrough with live
+guidance; all 48 CPU/GPU comparisons matched. Vulkan synchronization validation
+and N-body regressions passed, and two-/four-mouth screenshots were inspected to
+confirm the square-corner leaks are sealed.
+
+## Historical wide two-axis gameplay check (course version 4)
 
 Both CPU and GPU backends completed 20 growing passages with live predictions.
 All 48 CPU/GPU aggregate comparisons matched with nonzero vertical state and
@@ -332,7 +354,7 @@ This is automated coverage, not human playtesting or an FPGA energy result.
 
 ## Historical long-tunnel check (2026-11-09, course version 3)
 
-These timings predate the wider, two-axis, variable-length version 4 game above.
+These timings predate the wider two-axis and one-minute-paced versions above.
 Both rendered backends passed 20 twelve-second sections with live predictions,
 about 17.1 ms/frame under the 60 FPS cap. The lateral-continuity regression,
 48 exact CPU/GPU request comparisons, Vulkan synchronization validation and the

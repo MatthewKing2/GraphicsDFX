@@ -22,6 +22,32 @@ void object(std::vector<SceneInstance> &scene, glm::vec3 center, glm::vec3 size,
     item.tint = glm::vec4(color, primitive);
     scene.push_back(item);
 }
+void triangle(std::vector<SceneInstance> &scene, glm::vec3 a, glm::vec3 b, glm::vec3 tip,
+              float depth, glm::vec3 color) {
+    // The existing triangular-prism primitive has base (-.5,-.5)..(.5,-.5)
+    // and tip (0,.5) in local X/Z. Map it onto any front-wall triangle.
+    if ((b.x - a.x) * (tip.z - a.z) - (b.z - a.z) * (tip.x - a.x) < 0)
+        std::swap(a, b);
+    glm::vec3 base = (a + b) * .5f;
+    SceneInstance item;
+    item.transform[0] = glm::vec4(b - a, 0);
+    item.transform[1] = glm::vec4(0, depth, 0, 0);
+    item.transform[2] = glm::vec4(tip - base, 0);
+    item.transform[3] = glm::vec4((base + tip) * .5f, 1);
+    item.tint = glm::vec4(color, 2);
+    scene.push_back(item);
+}
+void mouthCorners(std::vector<SceneInstance> &scene, float x, float y) {
+    float diagonal = tunnelRadius * std::sqrt(.5f);
+    for (int sx : {-1, 1})
+        for (int sz : {-1, 1}) {
+            glm::vec3 corner(x + sx * tunnelRadius, y, sz * tunnelRadius),
+                right(x + sx * tunnelRadius, y, 0), top(x, y, sz * tunnelRadius),
+                tip(x + sx * diagonal, y, sz * diagonal);
+            triangle(scene, right, corner, tip, .45f, {.018f, .02f, .032f});
+            triangle(scene, corner, top, tip, .45f, {.018f, .02f, .032f});
+        }
+}
 void rectangle(std::vector<SceneInstance> &scene, float x, float y, float w, float h,
                glm::vec3 color) {
     SceneInstance item;
@@ -270,7 +296,7 @@ void Game::step(const GameControls &input, float dt) {
     player.speed = INITIAL_SPEED + FORWARD_ACCELERATION * player.elapsed;
     player.feet.y = distanceAt(player.elapsed);
     const float phase = (player.elapsed - sectionStart) / duration;
-    const float entry = prediction::ENTRY_TICK / (duration * 60);
+    const float entry = prediction::entryTick(player.stage) / (duration * 60);
     const float merge = prediction::mergeTick(player.stage) / (duration * 60);
     auto inside = [&](float x, int limit) {
         return prediction::withinTube(int(std::round(x * 1000)),
@@ -305,7 +331,7 @@ void Game::step(const GameControls &input, float dt) {
         for (unsigned event = 0; event < prediction::obstacleCount(player.stage); ++event) {
             float eventPhase = prediction::hazardTick(player.stage, event) / (duration * 60);
             // Test the whole visible hazard depth, not just its central plane.
-            const float halfWindow = 3.0f / (duration * 60);
+            const float halfWindow = prediction::contactTicks(player.stage) / (duration * 60);
             if (previousPhase <= eventPhase + halfWindow && phase >= eventPhase - halfWindow) {
                 unsigned tick = unsigned(player.worldTime * 60);
                 if (prediction::blocked(route.obstacles[event],
@@ -383,7 +409,7 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
     const float origin = player.feet.y;
     for (unsigned stage = first; stage <= player.stage + 2; ++stage) {
         float start = prediction::sectionStartTick(stage) / 60.0f;
-        float entry = float(prediction::ENTRY_TICK) / prediction::TICKS_PER_SECOND;
+        float entry = prediction::entryTick(stage) / 60.0f;
         float y0 = distanceAt(start) - origin, yEntry = distanceAt(start + entry) - origin;
         float yMerge = distanceAt(start + prediction::mergeTick(stage) / 60.0f) - origin,
               yEnd = distanceAt(start + prediction::sectionTicks(stage) / 60.0f) - origin;
@@ -393,8 +419,8 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
         tube(scene, 0, 0, yMerge, yEnd, shaftApothem, {.022f, .055f, .085f});
         ring(scene, 0, y0, shaftApothem, .09f, {.04f, .13f, .22f});
         // A dark bulkhead with 2..4 octagonal mouths, not a HUD route selector.
-        object(scene, {0, yEntry, 30.0f}, {96, .45f, 38.4f}, {.018f, .02f, .032f});
-        object(scene, {0, yEntry, -30.0f}, {96, .45f, 38.4f}, {.018f, .02f, .032f});
+        object(scene, {0, yEntry, 30.0f}, {96, .45f, 39.0f}, {.018f, .02f, .032f});
+        object(scene, {0, yEntry, -30.0f}, {96, .45f, 39.0f}, {.018f, .02f, .032f});
         float outer = float(count - 1) * TUNNEL_HALF_PITCH * .001f + tunnelRadius;
         for (int side : {-1, 1})
             object(scene, {side * (outer + (shaftRadius - outer) * .5f), yEntry, 0},
@@ -407,6 +433,7 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
         }
         for (unsigned choice = 0; choice < count; ++choice) {
             float x = prediction::laneCenter(count, choice) * .001f;
+            mouthCorners(scene, x, yEntry);
             auto rim = glm::vec3(.08f, .18f, .35f);
             if (stage == target && guidance.enabled && guidance.valid) {
                 float probability = guidance.percentages[choice];
@@ -431,7 +458,9 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                 const auto pose = prediction::pose(o, unsigned(player.worldTime * 60));
                 float y = distanceAt(start + prediction::hazardTick(stage, event) / 60.0f) - origin;
                 float eventTime = start + prediction::hazardTick(stage, event) / 60.0f;
-                float depth = distanceAt(eventTime + .05f) - distanceAt(eventTime - .05f);
+                float halfWindow = prediction::contactTicks(stage) / 60.0f;
+                float depth =
+                    distanceAt(eventTime + halfWindow) - distanceAt(eventTime - halfWindow);
                 float cx = x + pose.center * .001f;
                 if (o.kind == 0) {
                     SceneInstance spike;
@@ -575,7 +604,7 @@ void selfTest() {
     Game game(course);
     Autopilot bot;
     unsigned boundaries = 0;
-    for (int tick = 0; tick < 120 * 400 && game.state().stage < 20; ++tick) {
+    for (int tick = 0; tick < 120 * 60 && game.state().stage < 6; ++tick) {
         float previousX = game.state().feet.x;
         float previousZ = game.state().feet.z, previousVZ = game.state().verticalSpeed;
         unsigned previousStage = game.state().stage;
@@ -599,26 +628,63 @@ void selfTest() {
         if (game.state().stage != previousStage)
             ++boundaries;
     }
-    if (game.state().stage < 20 || game.state().dead || game.state().deaths)
+    if (game.state().stage < 6 || game.state().dead || game.state().deaths)
         throw std::runtime_error("viable tunnel sequence cannot be steered");
     if (game.state().speed <= INITIAL_SPEED + 20)
         throw std::runtime_error("forward speed not increasing");
-    if (boundaries != 20)
+    if (boundaries != 6)
         throw std::runtime_error("missing section-boundary coverage");
     std::cout
-        << "PASS 20 growing tunnels, acceleration and continuous horizontal/vertical motion\n";
+        << "PASS six opening tunnels, acceleration and continuous horizontal/vertical motion\n";
+    for (int tick = 0; tick < 120 * 45 && !game.state().dead; ++tick)
+        game.step(bot.sample(game), 1.0f / 120);
+    if (!game.state().dead || game.state().elapsed > 90)
+        throw std::runtime_error("late-game ramp does not challenge the seeded test pilot");
+    std::cout << "PASS seeded test pilot overwhelmed at " << game.state().elapsed << " seconds\n";
     std::cout << "PASS seeded 2/3/4-way forks and all four obstacle kinds\n";
     for (unsigned section = 0; section < 48; ++section) {
         if (prediction::sectionStartTick(section + 1) !=
             prediction::sectionStartTick(section) + prediction::sectionTicks(section))
-            throw std::runtime_error("noncontiguous growing course");
-        if (section && prediction::sectionTicks(section) < prediction::sectionTicks(section - 1))
-            throw std::runtime_error("tunnels shorten with progress");
-        if (prediction::hazardTick(section, 0) <= prediction::ENTRY_TICK ||
-            prediction::hazardTick(section, prediction::obstacleCount(section) - 1) + 3 >=
+            throw std::runtime_error("noncontiguous ramping course");
+        if (section && prediction::sectionTicks(section) > prediction::sectionTicks(section - 1))
+            throw std::runtime_error("reaction windows do not tighten with progress");
+        if (prediction::hazardTick(section, 0) <= prediction::entryTick(section) ||
+            prediction::hazardTick(section, prediction::obstacleCount(section) - 1) +
+                    prediction::contactTicks(section) >=
                 prediction::mergeTick(section))
             throw std::runtime_error("hazards outside tunnel");
+        for (unsigned event = 1; event < prediction::obstacleCount(section); ++event)
+            if (prediction::hazardTick(section, event) -
+                    prediction::hazardTick(section, event - 1) <=
+                2 * prediction::contactTicks(section))
+                throw std::runtime_error("overlapping hazard contact windows");
     }
+    if (INITIAL_SPEED != 27 || INITIAL_SPEED + 60 * FORWARD_ACCELERATION < 500 ||
+        prediction::sectionStartTick(12) != 60 * 60 || prediction::entryTick(12) > 18)
+        throw std::runtime_error("one-minute speed/reaction ramp regressed");
+    std::vector<SceneInstance> corners;
+    mouthCorners(corners, 0, 0);
+    if (corners.size() != 8)
+        throw std::runtime_error("missing mouth corner fillers");
+    for (int ix = -4; ix <= 4; ++ix)
+        for (int iz = -4; iz <= 4; ++iz) {
+            float x = ix * tunnelRadius / 5, z = iz * tunnelRadius / 5;
+            bool covered = false;
+            for (const auto &piece : corners) {
+                const auto &m = piece.transform;
+                float dx = x - m[3].x, dz = z - m[3].z;
+                float determinant = m[0].x * m[2].z - m[0].z * m[2].x;
+                float localX = (dx * m[2].z - dz * m[2].x) / determinant;
+                float localZ = (m[0].x * dz - m[0].z * dx) / determinant;
+                covered |= localZ >= -.50001f && localZ <= .50001f &&
+                           std::abs(localX) <= .25f - .5f * localZ + .00001f;
+            }
+            bool opening = prediction::withinTube(int(std::round(x * 1000)),
+                                                  int(std::round(z * 1000)), TUNNEL_RADIUS);
+            if (covered == opening)
+                throw std::runtime_error("octagonal mouth coverage mismatch");
+        }
+    std::cout << "PASS solid octagonal mouth corners and one-minute pacing\n";
     for (float direction : {-1.0f, 1.0f}) {
         Game vertical(course);
         vertical.restart();
@@ -646,7 +712,7 @@ void selfTest() {
                                prediction::TUNNEL_LIMIT))
         throw std::runtime_error("vertical blade clearance/octagonal walls broken");
     std::cout
-        << "PASS WASD/mouse vertical motion, blade escape, octagonal walls and growing timings\n";
+        << "PASS WASD/mouse vertical motion, blade escape, octagonal walls and ramping timings\n";
     Game noBrake(course);
     noBrake.restart();
     GameControls backwards;
@@ -681,7 +747,7 @@ void selfTest() {
             if (result.routes[c].survived == 0)
                 ++impossible;
         }
-        if (!anyViable)
+        if (!anyViable && stage < 6)
             throw std::runtime_error("predictor finds no viable opening");
     }
     if (!impossible)

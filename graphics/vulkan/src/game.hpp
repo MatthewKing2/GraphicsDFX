@@ -4,7 +4,7 @@
 #include "renderer.hpp"
 #include <string>
 namespace survival {
-constexpr float INITIAL_SPEED = 18.0f, FORWARD_ACCELERATION = 1.2f,
+constexpr float INITIAL_SPEED = 27.0f, FORWARD_ACCELERATION = 9.0f,
                 STEER_SPEED = prediction::MAX_VELOCITY * .06f, STEER_ACCELERATION = 240.0f;
 struct State {
     glm::vec3 feet{0, 0, 0};

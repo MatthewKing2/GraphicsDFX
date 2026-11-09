@@ -72,7 +72,7 @@ void validate(const Course &c, const Request &r) {
         r.xMm > SHAFT_LIMIT || r.velocity < -MAX_VELOCITY || r.velocity > MAX_VELOCITY ||
         r.zMm < -SHAFT_LIMIT || r.zMm > SHAFT_LIMIT || r.verticalVelocity < -MAX_VELOCITY ||
         r.verticalVelocity > MAX_VELOCITY ||
-        r.worldTick > sectionStartTick(r.junction) + ENTRY_TICK)
+        r.worldTick > sectionStartTick(r.junction) + entryTick(r.junction))
         throw std::invalid_argument("invalid tunnel prediction request");
     for (const auto &route : c.routes) {
         if (route.choiceCount < 2 || route.choiceCount > 4 || route.reactionTicks > 20 ||

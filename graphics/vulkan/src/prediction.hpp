@@ -6,10 +6,9 @@
 
 namespace prediction {
 using uint = std::uint32_t;
-constexpr uint STAGES = 32, CHOICES = 4, COURSE_VERSION = 4;
+constexpr uint STAGES = 32, CHOICES = 4, COURSE_VERSION = 5;
 constexpr uint TICKS_PER_SECOND = 60, ENTRY_TICK = TUNNEL_ENTRY_TICK, OBSTACLES = TUNNEL_OBSTACLES;
-constexpr uint HORIZON = TUNNEL_SECTION_BASE + TUNNEL_SECTION_GROWTH * TUNNEL_LENGTH_RAMP,
-               MAX_HORIZON = HORIZON, MAX_ROLLOUTS = 16384;
+constexpr uint HORIZON = TUNNEL_SECTION_BASE, MAX_HORIZON = HORIZON, MAX_ROLLOUTS = 16384;
 constexpr int PLAYER_RADIUS = TUNNEL_PLAYER_RADIUS, TUNNEL_LIMIT = TUNNEL_LOCAL_LIMIT,
               SHAFT_LIMIT = TUNNEL_SHAFT_LIMIT, MAX_VELOCITY = TUNNEL_MAX_VELOCITY,
               ACCELERATION = TUNNEL_ACCELERATION;
@@ -62,12 +61,14 @@ int laneCenter(uint count, uint choice);
 Pose pose(Obstacle, uint tick);
 uint sectionTicks(uint section);
 uint sectionStartTick(uint section);
+uint entryTick(uint section);
 uint mergeTick(uint section);
+uint contactTicks(uint section);
 uint obstacleCount(uint section);
 uint hazardTick(uint section, uint event);
 bool withinTube(int x, int z, int limit);
 bool blocked(Obstacle, int localX, int z, uint tick);
-Target steeringTarget(Route, int localX, int z, uint eventTick, uint event);
+Target steeringTarget(Route, int localX, int z, uint eventTick, uint event, uint halfWindow);
 void validate(const Course &, const Request &);
 Result evaluate(const Course &, const Request &);
 bool sameResults(const Result &, const Result &);

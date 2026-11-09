@@ -6,19 +6,30 @@ uint mixSeed(uint value) {
     value*=0x846ca68bu;value^=value>>16;return value|1u;
 }
 uint sectionTicks(uint section) {
-    return TUNNEL_SECTION_BASE+min(section,TUNNEL_LENGTH_RAMP)*TUNNEL_SECTION_GROWTH;
+    return max(TUNNEL_MIN_SECTION_TICKS,
+               TUNNEL_SECTION_BASE-min(section,TUNNEL_PACE_RAMP)*TUNNEL_SECTION_SHRINK);
 }
 uint sectionStartTick(uint section) {
-    uint ramp=min(section,TUNNEL_LENGTH_RAMP);
+    uint ramp=min(section,TUNNEL_PACE_RAMP);
     uint previous=ramp==0u?0u:ramp-1u;
-    return section*TUNNEL_SECTION_BASE+TUNNEL_SECTION_GROWTH*
-        (ramp*previous/2u+(section-ramp)*TUNNEL_LENGTH_RAMP);
+    return ramp*TUNNEL_SECTION_BASE-TUNNEL_SECTION_SHRINK*ramp*previous/2u+
+           (section-ramp)*TUNNEL_MIN_SECTION_TICKS;
 }
-uint mergeTick(uint section) {return sectionTicks(section)-TUNNEL_EXIT_TICKS;}
+uint entryTick(uint section) {
+    uint scaled=sectionTicks(section)*TUNNEL_ENTRY_TICK/TUNNEL_SECTION_BASE;
+    // Final squeeze: the opening window reaches 0.3 s at the one-minute section.
+    uint squeeze=section>TUNNEL_PACE_RAMP?min(section-TUNNEL_PACE_RAMP,5u)*11u:0u;
+    return max(18u,scaled-squeeze);
+}
+uint mergeTick(uint section) {
+    return sectionTicks(section)-max(2u,sectionTicks(section)*TUNNEL_EXIT_TICKS/TUNNEL_SECTION_BASE);
+}
+uint contactTicks(uint section) {return max(1u,sectionTicks(section)*3u/TUNNEL_SECTION_BASE);}
 uint obstacleCount(uint section) {return min(TUNNEL_OBSTACLES,4u+section/2u);}
 uint hazardTick(uint section,uint event) {
-    return TUNNEL_ENTRY_TICK+30u+
-        event*(mergeTick(section)-TUNNEL_ENTRY_TICK-60u)/(obstacleCount(section)-1u);
+    uint lead=max(4u,sectionTicks(section)*30u/TUNNEL_SECTION_BASE);
+    return entryTick(section)+lead+
+        event*(mergeTick(section)-entryTick(section)-2u*lead)/(obstacleCount(section)-1u);
 }
 bool withinTube(int x,int z,int limit) {
     // Eight wall half-planes, not a bounding box: diagonal flight must hit the wall too.
@@ -81,7 +92,7 @@ bool blocked(Obstacle obstacle,int x,int z,uint tick) {
     return abs(dx)+TUNNEL_PLAYER_RADIUS>=p.aperture ||
            abs(z)+TUNNEL_PLAYER_RADIUS>=p.aperture;
 }
-Target steeringTarget(Route route,int x,int z,uint eventTick,uint event) {
+Target steeringTarget(Route route,int x,int z,uint eventTick,uint event,uint halfWindow) {
     Target best;best.x=0;best.z=0;
     int bestCost=2147483647;
     // Nine 2D targets, not nine horizontal lanes; keep this first controller simple.
@@ -89,8 +100,8 @@ Target steeringTarget(Route route,int x,int z,uint eventTick,uint event) {
         int cx=ix*6500,cz=iz*6500;
         if(withinTube(cx,cz,TUNNEL_LOCAL_LIMIT) &&
            !blocked(route.obstacles[event],cx,cz,eventTick) &&
-           !blocked(route.obstacles[event],cx,cz,eventTick-3u) &&
-           !blocked(route.obstacles[event],cx,cz,eventTick+3u)) {
+           !blocked(route.obstacles[event],cx,cz,eventTick-halfWindow) &&
+           !blocked(route.obstacles[event],cx,cz,eventTick+halfWindow)) {
             int cost=abs(cx-x)+abs(cz-z)+(abs(cx)+abs(cz))/4;
             if(cost<bestCost) {bestCost=cost;best.x=cx;best.z=cz;}
         }

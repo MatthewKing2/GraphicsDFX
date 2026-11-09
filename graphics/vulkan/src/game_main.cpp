@@ -132,7 +132,8 @@ void validateGpu(GpuPrediction &gpu, const prediction::Course &course) {
             r.rollouts = count;
             r.junction = stage;
             r.routeCount = prediction::choices(course, stage);
-            r.worldTick = prediction::sectionStartTick(stage) + (cases % 3) * 10;
+            r.worldTick = prediction::sectionStartTick(stage) +
+                          std::min((cases % 3) * 10, prediction::entryTick(stage) - 1);
             r.seed = 12345 + stage;
             r.xMm = cases % 2 ? 35000 : -1200;
             r.zMm = cases % 2 ? -5000 : 6000;
@@ -434,18 +435,18 @@ int main(int argc, char **argv) {
                 frameTimes.clear();
             }
             ++frameNumber;
-            if (smoke && game.state().stage >= 20) {
+            if (smoke && game.state().stage >= 6) {
                 if (accepted < 3)
                     throw std::runtime_error("live route guidance not connected");
-                std::cout << "PASS rendered dive: 20 decisions, speed=" << game.state().speed
-                          << " accepted_predictions=" << accepted << " frames=" << frameNumber
-                          << '\n';
+                std::cout << "PASS rendered dive: six opening decisions, speed="
+                          << game.state().speed << " accepted_predictions=" << accepted
+                          << " frames=" << frameNumber << '\n';
                 break;
             }
             if (frameLimit && frameNumber >= frameLimit)
                 break;
             if (smoke && frameNumber > 2000)
-                throw std::runtime_error("dive smoke did not reach 20 forks");
+                throw std::runtime_error("dive smoke did not reach six opening forks");
         }
         return 0;
     } catch (const std::exception &error) {

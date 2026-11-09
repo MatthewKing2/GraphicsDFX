@@ -48,7 +48,7 @@ $oldSync=$env:VK_LAYER_VALIDATE_SYNC
 try {
     $env:VK_LAYER_VALIDATE_SYNC='1'
     Run-GameCheck 'validation' @('--validate')
-    Run-GameCheck 'gpu-smoke' @('--smoke','--backend','gpu','--capture-frame','27','--capture','build/game-fork.bmp')
+    Run-GameCheck 'gpu-smoke' @('--smoke','--backend','gpu','--capture-frame','32','--capture','build/game-fork.bmp')
     Run-GameCheck 'cpu-smoke' @('--smoke','--backend','cpu')
     Run-GameCheck 'four-way' @('--smoke','--frames','96','--capture-frame','93','--capture','build/game-fourway.bmp')
     Run-GameCheck 'inside' @('--smoke','--frames','47','--capture-frame','45','--capture','build/game-inside.bmp')
