@@ -57,7 +57,7 @@ RolloutResult rollout(COURSE_PARAM Request request, uint choice, uint number) {
                 if (!gateReacted) {
                     gateReacted = true;
                     rng = randomNext(rng);
-                    if (rng % 10000u < 700u) return result; // late braking once, not once per wait tick
+                    if (rng % 10000u < 1500u) return result; // modeled late braking once, not once per wait tick
                 }
                 next = min(next, int(route.gateMm) - 901);
             }

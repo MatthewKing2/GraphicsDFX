@@ -1,9 +1,13 @@
-param([switch]$SkipBuild,[switch]$Benchmark)
+param([switch]$SkipBuild,[switch]$Benchmark,[switch]$NBody)
 $ErrorActionPreference='Stop'
 $project=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if(-not $SkipBuild) {
     & make -C $project game
     if($LASTEXITCODE -ne 0) {throw 'Game build failed'}
+    if($NBody) {
+        & make -C $project shaders build/nbody_test.exe
+        if($LASTEXITCODE -ne 0) {throw 'N-body test build failed'}
+    }
 }
 if(-not ('GameTestWindow' -as [type])) {Add-Type -TypeDefinition @'
 using System;
@@ -21,8 +25,9 @@ public static class GameTestWindow {
 function Run-GameCheck([string]$Name,[string[]]$GameArguments,[string]$Executable='survival_game.exe') {
     $out=Join-Path $project "build/game-$Name-output.log"
     $err=Join-Path $project "build/game-$Name-errors.log"
-    $launch=@{FilePath=Join-Path $project "build/$Executable";ArgumentList=$GameArguments;WorkingDirectory=$project;
+    $launch=@{FilePath=Join-Path $project "build/$Executable";WorkingDirectory=$project;
         WindowStyle='Hidden';RedirectStandardOutput=$out;RedirectStandardError=$err;PassThru=$true}
+    if($GameArguments.Count) {$launch.ArgumentList=$GameArguments}
     $process=Start-Process @launch
     $handle=$process.Handle
     $timer=[Diagnostics.Stopwatch]::StartNew()
@@ -43,8 +48,9 @@ $oldSync=$env:VK_LAYER_VALIDATE_SYNC
 try {
     $env:VK_LAYER_VALIDATE_SYNC='1'
     Run-GameCheck 'validation' @('--validate')
-    Run-GameCheck 'gpu-smoke' @('--smoke','--backend','gpu')
+    Run-GameCheck 'gpu-smoke' @('--smoke','--backend','gpu','--capture','build/game-fork.bmp')
     Run-GameCheck 'cpu-smoke' @('--smoke','--backend','cpu')
+    if($NBody) {Run-GameCheck 'nbody-regression' @() 'nbody_test.exe'}
     if($Benchmark) {
         & make -C $project build/survival_benchmark.exe
         if($LASTEXITCODE -ne 0) {throw 'Benchmark build failed'}

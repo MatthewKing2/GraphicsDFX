@@ -18,6 +18,7 @@
 
 !graphics/
 !graphics/vulkan/
+!graphics/vulkan/play.bat
 !graphics/vulkan/src/
 !graphics/vulkan/src/renderer.cpp
 !graphics/vulkan/src/renderer.hpp

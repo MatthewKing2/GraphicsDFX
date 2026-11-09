@@ -215,9 +215,16 @@ public:
         sceneObjects = nullptr;
     }
 
+    void captureNextFrame(const std::string& path) {
+        if (!sceneMode || !captureSupported) throw std::runtime_error("scene screenshot unsupported");
+        capturePath = path;
+    }
+
     void drawFrame(
         const FrameTransforms& transforms,
         const SimulationParameters& simulation) {
+
+        if (sceneMode) throw std::logic_error("use drawScene for the game renderer");
 
         if (!std::isfinite(simulation.stepSize) || simulation.stepSize < 0.0f ||
             !std::isfinite(simulation.softening) || simulation.softening <= 0.0f ||
@@ -229,6 +236,7 @@ public:
     }
 
     std::vector<gpu_particle> readParticles() {
+        if (sceneMode) throw std::logic_error("a scene renderer has no particles");
         if (isCpu()) return cpuSimulation->particles();
         // Deliberately blocking: useful for correctness tests, not the frame loop.
         if (vkDeviceWaitIdle(device) != VK_SUCCESS) {
@@ -404,6 +412,11 @@ private:
     };
     std::array<ParticleBuffer, 2> particleBuffers{};
     ParticleBuffer sortKeys, treeNodes, sortedRanks;
+    ParticleBuffer screenshot;
+    void* screenshotMapped = nullptr;
+    VkDeviceSize screenshotBytes = 0;
+    bool captureSupported = false;
+    std::string capturePath;
     uint32_t leafCount = 1;
     uint32_t currentParticleBuffer = 0;
 
@@ -529,6 +542,9 @@ private:
 
     void cleanup() {
         cleanupSwapChain();
+        if (screenshotMapped) vkUnmapMemory(device, screenshot.memory);
+        if (screenshot.buffer) vkDestroyBuffer(device, screenshot.buffer, nullptr);
+        if (screenshot.memory) vkFreeMemory(device, screenshot.memory, nullptr);
         if (timestampPool != VK_NULL_HANDLE) {
             vkDestroyQueryPool(device, timestampPool, nullptr);
         }
@@ -780,6 +796,8 @@ private:
         createInfo.imageExtent = extent;
         createInfo.imageArrayLayers = 1;
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        captureSupported = sceneMode && (swapChainSupport.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        if (captureSupported) createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
         uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
@@ -1861,6 +1879,23 @@ private:
             }
         }
 
+        if (!capturePath.empty()) {
+            VkImageMemoryBarrier image{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            image.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; image.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
+            image.oldLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; image.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            image.srcQueueFamilyIndex=image.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+            image.image=swapChainImages[imageIndex];
+            image.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT; image.subresourceRange.levelCount=1; image.subresourceRange.layerCount=1;
+            vkCmdPipelineBarrier(commandBuffer,VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&image);
+            VkBufferImageCopy copy{};copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.imageSubresource.layerCount=1;
+            copy.imageExtent={swapChainExtent.width,swapChainExtent.height,1};
+            vkCmdCopyImageToBuffer(commandBuffer,swapChainImages[imageIndex],VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,screenshot.buffer,1,&copy);
+            image.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;image.dstAccessMask=0;
+            image.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;image.newLayout=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            vkCmdPipelineBarrier(commandBuffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,1,&image);
+            VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(commandBuffer,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&host,0,nullptr,0,nullptr);
+        }
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
         }
@@ -2017,6 +2052,7 @@ private:
         }
 
         // The fence guarantees this frame slot is no longer being read by the GPU.
+        if (!capturePath.empty()) prepareScreenshot();
         if (isCpu() && !sceneMode) {
             const auto cpu = cpuSimulation->step(simulation, measure);
             timing.cpuBuildMs = cpu.buildMs;
@@ -2060,6 +2096,10 @@ private:
             }
         }
         timing.submitMs = since(cpuStart);
+        if (!capturePath.empty()) {
+            if (vkWaitForFences(device,1,&inFlightFences[currentFrame],VK_TRUE,UINT64_MAX)!=VK_SUCCESS) throw std::runtime_error("screenshot fence failed");
+            saveScreenshot();
+        }
         // Advance only after a successful submission (not on skipped acquire frames).
         if (!isCpu()) currentParticleBuffer = 1 - currentParticleBuffer;
         lastSubmittedFrame = currentFrame;
@@ -2101,6 +2141,38 @@ private:
         }
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
+    void prepareScreenshot() {
+        const VkDeviceSize bytes=VkDeviceSize(swapChainExtent.width)*swapChainExtent.height*4;
+        if (bytes==screenshotBytes) return;
+        if(screenshotMapped) vkUnmapMemory(device,screenshot.memory);
+        if(screenshot.buffer) vkDestroyBuffer(device,screenshot.buffer,nullptr);
+        if(screenshot.memory) vkFreeMemory(device,screenshot.memory,nullptr);
+        screenshot={};screenshotMapped=nullptr;
+        createBuffer(bytes,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,screenshot.buffer,screenshot.memory);
+        if(vkMapMemory(device,screenshot.memory,0,bytes,0,&screenshotMapped)!=VK_SUCCESS) throw std::runtime_error("screenshot mapping failed");
+        screenshotBytes=bytes;
+    }
+    void saveScreenshot() {
+        if(swapChainImageFormat!=VK_FORMAT_B8G8R8A8_SRGB && swapChainImageFormat!=VK_FORMAT_B8G8R8A8_UNORM &&
+            swapChainImageFormat!=VK_FORMAT_R8G8B8A8_SRGB && swapChainImageFormat!=VK_FORMAT_R8G8B8A8_UNORM) throw std::runtime_error("unsupported screenshot format");
+        const bool bgra=swapChainImageFormat==VK_FORMAT_B8G8R8A8_SRGB||swapChainImageFormat==VK_FORMAT_B8G8R8A8_UNORM;
+        unsigned char header[54]{};header[0]='B';header[1]='M';header[10]=54;header[14]=40;header[26]=1;header[28]=32;
+        auto word=[&](int offset,uint32_t value) {for(int i=0;i<4;++i) header[offset+i]=static_cast<unsigned char>(value>>(i*8));};
+        word(2,uint32_t(screenshotBytes)+54);word(18,swapChainExtent.width);word(22,swapChainExtent.height);word(34,uint32_t(screenshotBytes));
+        std::ofstream file(capturePath,std::ios::binary);
+        if(!file) throw std::runtime_error("cannot open screenshot output");
+        file.write(reinterpret_cast<const char*>(header),sizeof(header));
+        const auto* pixels=static_cast<const unsigned char*>(screenshotMapped);
+        std::vector<unsigned char> row(size_t(swapChainExtent.width)*4);
+        for(int y=int(swapChainExtent.height)-1;y>=0;--y) {
+            std::memcpy(row.data(),pixels+size_t(y)*row.size(),row.size());
+            if(!bgra) for(size_t x=0;x<row.size();x+=4) std::swap(row[x],row[x+2]);
+            file.write(reinterpret_cast<const char*>(row.data()),row.size());
+        }
+        if(!file) throw std::runtime_error("screenshot write failed");
+        std::cout<<"Saved screenshot "<<capturePath<<'\n';capturePath.clear();
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& code) {
@@ -2335,6 +2407,8 @@ Renderer::Renderer(uint32_t width, uint32_t height, const char* title,
 void Renderer::drawScene(const FrameTransforms& transforms, const std::vector<SceneInstance>& objects) {
     impl->drawScene(transforms, objects);
 }
+
+void Renderer::captureNextFrame(const std::string& path) {impl->captureNextFrame(path);}
 
 ComputeContext Renderer::computeContext() const { return impl->computeContext(); }
 

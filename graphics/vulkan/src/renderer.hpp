@@ -89,6 +89,9 @@ public:
     Renderer(std::uint32_t width, std::uint32_t height, const char* title,
         const Mesh& mesh, std::uint32_t instanceCapacity);
     void drawScene(const FrameTransforms&, const std::vector<SceneInstance>&);
+    // Debug-only: the next submitted scene frame is copied to a BMP. This one
+    // frame waits for readback; normal interactive rendering never does this.
+    void captureNextFrame(const std::string& path);
     // Prediction uses this renderer's device/queue, on the same host thread.
     // The predictor must be destroyed before the renderer.
     ComputeContext computeContext() const;
