@@ -132,9 +132,11 @@ void validateGpu(GpuPrediction &gpu, const prediction::Course &course) {
             r.rollouts = count;
             r.junction = stage;
             r.routeCount = prediction::choices(course, stage);
-            r.worldTick = stage * prediction::SECTION_TICKS + (cases % 3) * 10;
+            r.worldTick = prediction::sectionStartTick(stage) + (cases % 3) * 10;
             r.seed = 12345 + stage;
-            r.xMm = cases % 2 ? 900 : -1200;
+            r.xMm = cases % 2 ? 35000 : -1200;
+            r.zMm = cases % 2 ? -5000 : 6000;
+            r.verticalVelocity = cases % 2 ? 90 : -120;
             r.velocity = cases % 2 ? -20 : 15;
             auto cpu = prediction::evaluate(course, r);
             if (!gpu.submit(r) || gpu.submit(r))
@@ -165,7 +167,7 @@ void benchmark(GpuPrediction &gpu, const prediction::Course &course, const std::
             prediction::Request r;
             r.rollouts = count;
             r.junction = stage;
-            r.worldTick = stage * prediction::SECTION_TICKS;
+            r.worldTick = prediction::sectionStartTick(stage);
             r.routeCount = prediction::choices(course, stage);
             auto reference = prediction::evaluate(course, r);
             for (unsigned backend = 0; backend < 2; ++backend) {

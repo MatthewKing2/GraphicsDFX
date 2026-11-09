@@ -65,7 +65,7 @@ GameControls GameInput::sample() {
     GameControls c;
     c.focused = glfwGetWindowAttrib(impl->window, GLFW_FOCUSED) != 0;
     c.strafe = float(impl->down(GLFW_KEY_D)) - float(impl->down(GLFW_KEY_A));
-    c.forward = float(impl->down(GLFW_KEY_W)) - float(impl->down(GLFW_KEY_S));
+    c.vertical = float(impl->down(GLFW_KEY_W)) - float(impl->down(GLFW_KEY_S));
     c.mouseX = impl->dx;
     c.mouseY = impl->dy;
     impl->dx = impl->dy = 0;

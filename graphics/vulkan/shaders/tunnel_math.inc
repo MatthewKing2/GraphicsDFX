@@ -5,6 +5,26 @@ uint mixSeed(uint value) {
     value^=value>>16;value*=0x7feb352du;value^=value>>15;
     value*=0x846ca68bu;value^=value>>16;return value|1u;
 }
+uint sectionTicks(uint section) {
+    return TUNNEL_SECTION_BASE+min(section,TUNNEL_LENGTH_RAMP)*TUNNEL_SECTION_GROWTH;
+}
+uint sectionStartTick(uint section) {
+    uint ramp=min(section,TUNNEL_LENGTH_RAMP);
+    uint previous=ramp==0u?0u:ramp-1u;
+    return section*TUNNEL_SECTION_BASE+TUNNEL_SECTION_GROWTH*
+        (ramp*previous/2u+(section-ramp)*TUNNEL_LENGTH_RAMP);
+}
+uint mergeTick(uint section) {return sectionTicks(section)-TUNNEL_EXIT_TICKS;}
+uint obstacleCount(uint section) {return min(TUNNEL_OBSTACLES,4u+section/2u);}
+uint hazardTick(uint section,uint event) {
+    return TUNNEL_ENTRY_TICK+30u+
+        event*(mergeTick(section)-TUNNEL_ENTRY_TICK-60u)/(obstacleCount(section)-1u);
+}
+bool withinTube(int x,int z,int limit) {
+    // Eight wall half-planes, not a bounding box: diagonal flight must hit the wall too.
+    int ax=abs(x),az=abs(z);
+    return ax*1024+az*424<=limit*1024 && az*1024+ax*424<=limit*1024;
+}
 int laneCenter(uint count,uint choice) {return (int(choice)*2-int(count)+1)*TUNNEL_HALF_PITCH;}
 int sineQ10(uint phase) {
     uint index=((phase+2u)>>2u)&31u;
@@ -35,28 +55,44 @@ Pose pose(Obstacle obstacle,uint tick) {
         ((obstacle.extent-obstacle.opening)*(wave+1024))/2048;
     return result;
 }
-bool blocked(Obstacle obstacle,int x,uint tick) {
+bool blocked(Obstacle obstacle,int x,int z,uint tick) {
     Pose p=pose(obstacle,tick);
     int dx=x-p.center;
-    if(obstacle.kind==0u) return abs(dx)<(obstacle.extent*400)/3000+180;
-    if(obstacle.kind==1u) return abs(dx)<obstacle.extent+180;
-    if(obstacle.kind==2u) {
-        // Conservative circle-vs-oriented-bar test; same boundary in real play.
-        return abs(dx*p.cosine)<=obstacle.extent*1024+260640 &&
-               abs(dx*p.sine)<=210*1024+260640;
+    if(obstacle.kind==0u) {
+        int orientedZ=(obstacle.flags&1u)!=0u?-z:z;
+        int top=TUNNEL_SPIKE_HEIGHT/2-TUNNEL_SPIKE_CENTER;
+        int bottom=top-TUNNEL_SPIKE_HEIGHT;
+        // Conservative circle-vs-triangle half-planes, including the base.
+        return orientedZ>=bottom-TUNNEL_PLAYER_RADIUS &&
+            orientedZ<=top+TUNNEL_PLAYER_RADIUS &&
+            abs(dx)*TUNNEL_SPIKE_HEIGHT+obstacle.extent*(orientedZ-top)<=
+                TUNNEL_PLAYER_RADIUS*(TUNNEL_SPIKE_HEIGHT+obstacle.extent);
     }
-    return abs(dx)+180>=p.aperture;
+    if(obstacle.kind==1u) return abs(dx)<obstacle.extent+TUNNEL_PLAYER_RADIUS &&
+        abs(z)<TUNNEL_SLIDER_HALF_HEIGHT+TUNNEL_PLAYER_RADIUS;
+    if(obstacle.kind==2u) {
+        // Rotate BOTH coordinates into blade space. Vertical flight can escape it.
+        int u=dx*p.cosine+z*p.sine,v=-dx*p.sine+z*p.cosine;
+        int margin=TUNNEL_PLAYER_RADIUS*1026;
+        return abs(u)<=obstacle.extent*1024+margin &&
+               abs(v)<=TUNNEL_BLADE_HALF_THICKNESS*1024+margin;
+    }
+    // Four moving edges form a square opening, clipped by the octagonal tunnel.
+    return abs(dx)+TUNNEL_PLAYER_RADIUS>=p.aperture ||
+           abs(z)+TUNNEL_PLAYER_RADIUS>=p.aperture;
 }
-int steeringTarget(Route route,int x,uint tick,uint eventTick,uint event) {
-    int best=0,bestCost=2147483647;
-    for(int candidateIndex=-4;candidateIndex<=4;++candidateIndex) {
-        int candidate=candidateIndex*700;
-        if(!blocked(route.obstacles[event],candidate,eventTick) &&
-           !blocked(route.obstacles[event],candidate,eventTick-3u) &&
-           !blocked(route.obstacles[event],candidate,eventTick+3u)) {
-            // Prefer a nearby clear lane, with a mild centering bias.
-            int cost=abs(candidate-x)+abs(candidate)/4;
-            if(cost<bestCost) {bestCost=cost;best=candidate;}
+Target steeringTarget(Route route,int x,int z,uint eventTick,uint event) {
+    Target best;best.x=0;best.z=0;
+    int bestCost=2147483647;
+    // Nine 2D targets, not nine horizontal lanes; keep this first controller simple.
+    for(int ix=-1;ix<=1;++ix) for(int iz=-1;iz<=1;++iz) {
+        int cx=ix*6500,cz=iz*6500;
+        if(withinTube(cx,cz,TUNNEL_LOCAL_LIMIT) &&
+           !blocked(route.obstacles[event],cx,cz,eventTick) &&
+           !blocked(route.obstacles[event],cx,cz,eventTick-3u) &&
+           !blocked(route.obstacles[event],cx,cz,eventTick+3u)) {
+            int cost=abs(cx-x)+abs(cz-z)+(abs(cx)+abs(cz))/4;
+            if(cost<bestCost) {bestCost=cost;best.x=cx;best.z=cz;}
         }
     }
     return best;

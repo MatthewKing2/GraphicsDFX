@@ -16,24 +16,34 @@ Or from `graphics/vulkan`: `make game`, then `.\build\survival_game.exe`.
 
 - Space / Enter: start or retry. R: immediate new run.
 - A/D or horizontal mouse movement: steer sideways.
+- W/S or vertical mouse movement: steer up/down (mouse up means up).
 - No walking, braking, jumping, or free-look. Forward motion is automatic.
 - Escape: pause and release mouse; Escape resumes. Close the window to quit.
 - F1: CPU/GPU prediction; F2: signs/prediction off/on; F3: console/window statistics.
 
-Sections now last **12 seconds** (five times the previous duration). Tunnel mouths
-are 7 units across, versus 3.7 before, and each tunnel contains **ten hazards**
-instead of two. There are three seconds to enter a mouth and a short exit into the
-common shaft. Speed starts at 18 units/second, then rises by 1.2 every second
-without a forward-speed cap. The first fork has two openings; later forks have 2-4.
-Collision kills immediately. Position, mouse target and lateral velocity are
-preserved at exits: no automatic drift, snap, or recentering.
+Tunnel mouths are now **21 units across**, three times the previous width, with
+obstacles and steering speed scaled to match. Movement is in the full horizontal/
+vertical cross-section, with octagonal wall collision. Rotating blades can be
+passed above/below; crushers have four visible edges, not invisible vertical walls.
+
+There are **six seconds before each entrance** (previously three) to move between
+openings and compare their live probabilities. The passage itself starts at about
+4.3 seconds and grows by half a second per section toward 12.3 seconds, followed
+by a 0.73-second common-shaft exit. Total sections grow from 11 to 19 seconds.
+Early passages have four hazards; this grows to ten. Length is capped after
+sixteen sections. Forward speed still starts at 18 units/second and rises by 1.2
+every second. The first fork has two openings; later forks have 2-4.
+Collision kills immediately. Both steering axes preserve position, mouse targets
+and velocity at exits: no automatic drift, snap, or recentering.
+
+Passage walls are warm plum, the open shaft is cool blue, and an amber rim marks
+each exit. This keeps the dark low-poly style while making the transition visible.
 
 The first sections have small blocks, slow blades, and wide crusher gaps. Over
 the first twelve sections, obstacles grow, gaps narrow and motion speeds up.
-Impossible openings start only after the opening three sections. Forks remain
-12 seconds apart; increased speed alone does not shorten that interval. This is
-an authored difficulty ramp alongside acceleration, not a physical consequence
-of fixed-length tunnels. Physical section lengths grow with forward speed.
+Impossible openings start only after the opening three sections. This is an
+authored difficulty/length ramp alongside acceleration, not fixed-length tunnels
+that get shorter in time as speed rises. Physical lengths grow with forward speed.
 
 No gameplay HUD, crosshair, or fixed probability panels. Percentages float in world
 space above the upcoming openings. Green outlines mark the preferred estimate;
@@ -52,8 +62,8 @@ collision, not manually forced to zero. There are no checkpoints or finish line;
 survival time is the score.
 
 Normal launches choose a fresh course seed; retries repeat it for practice.
-The 32-section layout (including its difficulty ramp) loops after 384 seconds
-while forward speed keeps rising.
+The 32-section obstacle templates wrap; the section-length ramp does not reset.
+Forward speed keeps rising.
 This is intentionally not unlimited unique procedural content.
 
 Useful options from `graphics/vulkan`:
@@ -74,23 +84,23 @@ build is not implemented yet.
 
 ## What the probability means
 
-"Given the incoming lateral position/velocity, how often does our delayed/noisy
-steering controller survive through this tunnel's exit?"
+"Given the incoming horizontal/vertical position and velocity, how often does our
+delayed/noisy steering controller survive through this tunnel's exit?"
 
 All choices use the **same section exit**. This versioned model replaces the old
 eight-second jump-failure model. When signs are shown from the previous tunnel,
 prediction is conditional on reaching the next fork at the current world-space
-lateral position/velocity. It does not predict your intervening inputs or promise
-survival through the currently selected tunnel as well.
+horizontal/vertical position and velocity. It does not predict your intervening
+inputs or promise survival through the currently selected tunnel as well.
 
-Each rollout stores lateral position/velocity, reaction countdown, obstacle index,
+Each rollout stores two-axis position/velocity, reaction countdown, obstacle index,
 PRNG state, and alive/dead state. At 60 Hz it:
 
-1. Advances delayed steering with acceleration and a lateral speed limit.
-2. Checks nine candidate lateral targets against the next obstacle's arrival and
-   contact-window endpoints, choosing a nearby clear target.
+1. Advances delayed steering with acceleration and a per-axis speed limit.
+2. Checks a 3x3 grid of nine horizontal/vertical targets against the next obstacle's
+   arrival and contact-window endpoints, choosing a nearby clear target.
 3. Samples bounded reaction delay, target noise, and arrival-timing uncertainty.
-4. Tests entrance, wall and moving obstacle boundaries at each contact tick.
+4. Tests entrance, octagonal walls and 2D obstacle boundaries at each contact tick.
 5. Stops on collision or counts survival at the common exit.
 
 There is no independent random "die" coin. Real gameplay receives no random
@@ -115,6 +125,12 @@ points (roughly +/-4.3 points for a 95% normal-approximation interval). That is
 sampling error *under this controller model*, not a human-survival guarantee.
 Better sampling cannot fix an inaccurate player model.
 
+This live behavior is intentional: moving in front of an opening changes its
+estimate. We do NOT freeze a centered-player rating or compute only once per fork.
+Refresh remains at most 10 Hz. Vertical state is now included in the same shared
+CPU/GLSL Monte Carlo model; no gusts, reactive gates or other proposed algorithm
+features have been added.
+
 ## What the FPGA would actually compute
 
 It would execute the **whole rollout-and-aggregation engine**, not render meshes,
@@ -129,8 +145,8 @@ run floating-point rigid-body physics, or stream random numbers back to the host
 
 Periods are powers of two. Rotation uses 32 fixed-point directions, shared with
 rendering; reversals reflect phase. No floating-point trigonometry is needed in
-the predictor. Useful prospective widths include 15 signed bits for shaft position,
-9 for velocity, 7-9 for motion phase, and 32 for PRNG. Begin with a few reusable
+the predictor. Useful prospective widths include 17 signed bits per shaft-position axis,
+11 per velocity axis, 7-9 for motion phase, and 32 for PRNG. Begin with a few reusable
 engines and local tables, not thousands of fully unrolled simulations. Actual
 resource usage and clock rate require synthesis and timing closure.
 
@@ -152,12 +168,12 @@ No RTL, driver, FPGA resource/timing result, or measured FPGA power is included.
 ## Memory, PCIe and the success criterion
 
 - Course: **43,008 bytes**, uploaded once and resident (32 sections x four slots,
-  ten 32-byte obstacles plus a 16-byte header per route; course version 3).
-- Request: **48 bytes**, including IDs, section, incoming state, clock and seed.
+  ten 32-byte obstacle slots plus a 16-byte header per route; course version 4).
+- Request: **64 bytes**, including IDs, section, two-axis state, clock and seed.
 - Result payload: **64 bytes**, four summaries; unused choice slots stay zero.
 
-At 10 Hz this is **1,120 payload bytes/second**, independent of rollout count.
-A future 16-byte response ID/version/run envelope would make it 1,280 bytes/second.
+At 10 Hz this is **1,280 payload bytes/second**, independent of rollout count.
+A future 16-byte response ID/version/run envelope would make it 1,440 bytes/second.
 These are payload calculations, not measured link utilization or power. Include
 framing, DMA descriptors, interrupts/polling, link transitions, host work and board
 idle power in the eventual experiment. No per-tick or per-rollout PCIe traffic.
@@ -177,7 +193,7 @@ The current predictor estimates a probability over trajectories, not whether an
 optimal path exists. A planner answering "there is a safe route" is not answering
 "how often does this imperfect controller survive?" That distinction motivates
 probabilistic analysis, **not Monte Carlo specifically**. Our current hazards are
-deterministic and lateral motion is one-dimensional. Reachability grids,
+deterministic, even with two-axis steering. Reachability grids,
 probability propagation/dynamic programming, precomputed phase tables, and small
 quadrature schemes are credible competitors. Even the guaranteed center-line and
 sealed routes have cheap special cases. They must be allowed in a fair baseline.
@@ -283,12 +299,14 @@ From the repository root:
 .\graphics\vulkan\tests\game-checks.ps1 -Benchmark -NBody
 ```
 
-Checks cover 20 consecutive viable forks, per-tick lateral continuity including
-entrances/exits, acceleration/no braking, 2/3/4 choices,
+Checks cover 20 consecutive growing tunnels, per-tick two-axis continuity including
+moving exits, W/S and mouse vertical movement, blade escape, octagonal wall corners,
+live-position probability changes, acceleration/no braking, 2/3/4 choices,
 all obstacle kinds, impossible routes, deterministic streams, stale results, and
 48 exact CPU/GPU comparisons including partial workgroups and course wrapping.
 Rendered tests verify live guidance. Screenshots: `build/game-fork.bmp`,
-`build/game-fourway.bmp`, and `build/game-title.bmp`.
+`build/game-fourway.bmp`, `build/game-inside.bmp`, `build/game-exit.bmp`, and
+`build/game-title.bmp`.
 
 The optimized benchmark fixes seed 12345 and tests three sections at 256/512/1024
 rollouts per choice, two warmups and six measured requests per case. Output:
@@ -301,8 +319,20 @@ Intentional rough edges: no audio, repeated 32-section course, flat geometry and
 a coarse, uncalibrated steering model. Next: playtest steering, decision timing,
 and obstacle readability rather than build a bigger engine.
 
-## Long-tunnel check (2026-11-09, course version 3)
+## Wide two-axis gameplay check (course version 4)
 
+Both CPU and GPU backends completed 20 growing passages with live predictions.
+All 48 CPU/GPU aggregate comparisons matched with nonzero vertical state and
+wide-shaft positions; Vulkan synchronization validation and the original N-body
+regressions passed. CPU-only tests additionally cover W/S, vertical mouse input,
+blade clearance above/below, octagonal corners, variable timing continuity,
+unchanged live-position dependence, and moving exits without recentering.
+Inside/exit/four-way screenshots were inspected for the new palette and geometry.
+This is automated coverage, not human playtesting or an FPGA energy result.
+
+## Historical long-tunnel check (2026-11-09, course version 3)
+
+These timings predate the wider, two-axis, variable-length version 4 game above.
 Both rendered backends passed 20 twelve-second sections with live predictions,
 about 17.1 ms/frame under the 60 FPS cap. The lateral-continuity regression,
 48 exact CPU/GPU request comparisons, Vulkan synchronization validation and the

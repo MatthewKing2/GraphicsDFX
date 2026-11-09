@@ -6,16 +6,13 @@
 
 namespace prediction {
 using uint = std::uint32_t;
-constexpr uint STAGES = 32, CHOICES = 4, COURSE_VERSION = 3;
-constexpr uint TICKS_PER_SECOND = 60, SECTION_TICKS = TUNNEL_SECTION_TICKS,
-               ENTRY_TICK = TUNNEL_ENTRY_TICK, MERGE_TICK = TUNNEL_MERGE_TICK,
-               OBSTACLES = TUNNEL_OBSTACLES;
-constexpr uint HORIZON = SECTION_TICKS, MAX_HORIZON = HORIZON, MAX_ROLLOUTS = 16384;
-constexpr int PLAYER_RADIUS = 180, TUNNEL_LIMIT = TUNNEL_LOCAL_LIMIT,
-              SHAFT_LIMIT = TUNNEL_SHAFT_LIMIT, MAX_VELOCITY = 200, ACCELERATION = 22;
-constexpr uint hazardTick(uint event) {
-    return TUNNEL_FIRST_HAZARD + event * TUNNEL_HAZARD_SPACING;
-}
+constexpr uint STAGES = 32, CHOICES = 4, COURSE_VERSION = 4;
+constexpr uint TICKS_PER_SECOND = 60, ENTRY_TICK = TUNNEL_ENTRY_TICK, OBSTACLES = TUNNEL_OBSTACLES;
+constexpr uint HORIZON = TUNNEL_SECTION_BASE + TUNNEL_SECTION_GROWTH * TUNNEL_LENGTH_RAMP,
+               MAX_HORIZON = HORIZON, MAX_ROLLOUTS = 16384;
+constexpr int PLAYER_RADIUS = TUNNEL_PLAYER_RADIUS, TUNNEL_LIMIT = TUNNEL_LOCAL_LIMIT,
+              SHAFT_LIMIT = TUNNEL_SHAFT_LIMIT, MAX_VELOCITY = TUNNEL_MAX_VELOCITY,
+              ACCELERATION = TUNNEL_ACCELERATION;
 
 // Each obstacle is an extruded cross-section at a known arrival tick.
 // kind: 0 triangular spike, 1 slider, 2 rotating bar, 3 contracting aperture.
@@ -36,6 +33,8 @@ struct alignas(16) Request {
     int xMm = 0, velocity = 0;
     uint worldTick = 0, seed = 12345;
     uint rollouts = 512, horizon = HORIZON, routeCount = 2, reserved = 0;
+    int zMm = 0, verticalVelocity = 0;
+    uint reserved2 = 0, reserved3 = 0;
 };
 struct alignas(16) Summary {
     uint survived = 0, progressTicks = 0, steps = 0, rollouts = 0;
@@ -48,17 +47,27 @@ struct Result {
 struct Pose {
     int center, cosine, sine, aperture;
 };
+struct Target {
+    int x, z;
+};
 static_assert(sizeof(Obstacle) == 32 && sizeof(Route) == 336 && sizeof(Course) == 43008,
               "course layout");
-static_assert(sizeof(Request) == 48 && offsetof(Request, xMm) == 16, "request layout");
+static_assert(sizeof(Request) == 64 && offsetof(Request, xMm) == 16 && offsetof(Request, zMm) == 48,
+              "request layout");
 static_assert(sizeof(Summary) == 16, "summary layout");
 Course makeCourse(uint seed = 12345);
 uint choices(const Course &, uint section);
 const Route &route(const Course &, uint section, uint choice);
 int laneCenter(uint count, uint choice);
 Pose pose(Obstacle, uint tick);
-bool blocked(Obstacle, int localX, uint tick);
-int steeringTarget(Route, int localX, uint tick, uint eventTick, uint event);
+uint sectionTicks(uint section);
+uint sectionStartTick(uint section);
+uint mergeTick(uint section);
+uint obstacleCount(uint section);
+uint hazardTick(uint section, uint event);
+bool withinTube(int x, int z, int limit);
+bool blocked(Obstacle, int localX, int z, uint tick);
+Target steeringTarget(Route, int localX, int z, uint eventTick, uint event);
 void validate(const Course &, const Request &);
 Result evaluate(const Course &, const Request &);
 bool sameResults(const Result &, const Result &);

@@ -4,11 +4,12 @@
 #include "renderer.hpp"
 #include <string>
 namespace survival {
-constexpr float SECTION_SECONDS = float(prediction::SECTION_TICKS) / prediction::TICKS_PER_SECOND,
-                INITIAL_SPEED = 18.0f, FORWARD_ACCELERATION = 1.2f;
+constexpr float INITIAL_SPEED = 18.0f, FORWARD_ACCELERATION = 1.2f,
+                STEER_SPEED = prediction::MAX_VELOCITY * .06f, STEER_ACCELERATION = 240.0f;
 struct State {
     glm::vec3 feet{0, 0, 0};
     float localX = 0, lateralSpeed = 0, mouseTarget = 0;
+    float verticalSpeed = 0, mouseVerticalTarget = 0;
     float elapsed = 0, worldTime = 0, speed = INITIAL_SPEED, best = 0;
     bool title = true, dead = false;
     unsigned stage = 0, run = 1, deaths = 0;

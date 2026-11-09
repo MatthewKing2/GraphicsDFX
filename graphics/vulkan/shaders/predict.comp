@@ -14,8 +14,10 @@ struct Request {
     uint id; uint courseVersion; uint run; uint junction;
     int xMm; int velocity; uint worldTick; uint seed;
     uint rollouts; uint horizon; uint routeCount; uint reserved;
+    int zMm; int verticalVelocity; uint reserved2; uint reserved3;
 };
 struct Pose { int center; int cosine; int sine; int aperture; };
+struct Target { int x; int z; };
 layout(binding=0,std430) readonly buffer Course { Route routes[]; } course;
 layout(binding=1,std430) buffer Results { uvec4 totals[4]; } outputData;
 layout(push_constant) uniform Parameters { Request request; } parameters;
