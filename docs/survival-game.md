@@ -1,4 +1,14 @@
-# VOID / DIVE
+# Current game: REACTOR / RUN
+
+The reactor iteration is now implemented. See [reactor-escape.md](reactor-escape.md)
+for the current mechanics, controls, coupled-relay computation, profiling commands,
+compact link contract, and explicitly unsynthesized LiteFury resource budget.
+The material below is the historical tunnel-only version, not the current
+predictor, pulse controls, memory sizes or benchmark results.
+
+---
+
+# Historical VOID / DIVE
 
 The accelerating tunnel iteration replaces the walking corridor MVP. The v1 code
 remains in Git (`113835c`); `survival-game-results.csv` is historical v1 data.

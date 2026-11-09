@@ -214,6 +214,14 @@ public:
         drawFrameInternal(transforms, SimulationParameters{});
         sceneObjects = nullptr;
     }
+    FrameTimings completedSceneTiming{};
+    bool completedSceneReady = false;
+    bool readCompletedSceneTiming(FrameTimings& result) {
+        if (!completedSceneReady) return false;
+        result = completedSceneTiming;
+        completedSceneReady = false;
+        return true;
+    }
 
     void captureNextFrame(const std::string& path) {
         if (!sceneMode || !captureSupported) throw std::runtime_error("scene screenshot unsupported");
@@ -1955,6 +1963,7 @@ private:
             frame.timings.gpuBuildMs = !isCpu() && isBarnesHut() ? duration(0, 1) : 0.0;
             frame.timings.gpuForceMs = isCpu() ? 0.0 : duration(1, 2);
             frame.timings.gpuRenderMs = duration(2, 3);
+            if (sceneMode) { completedSceneTiming = frame.timings; completedSceneReady = true; }
             computeMs = frame.timings.gpuBuildMs + frame.timings.gpuForceMs;
             renderMs = frame.timings.gpuRenderMs;
         } else if (result != VK_NOT_READY) {
@@ -2400,13 +2409,15 @@ Renderer::Renderer(
 Renderer::~Renderer() = default;
 
 Renderer::Renderer(uint32_t width, uint32_t height, const char* title,
-    const Mesh& mesh, uint32_t capacity)
+    const Mesh& mesh, uint32_t capacity, bool measureTimings)
     : impl(std::make_unique<Impl>(width, height, title, std::vector<Mesh>{mesh},
-        std::vector<gpu_particle>{}, "", RendererOptions{}, capacity)) {}
+        std::vector<gpu_particle>{}, "", [measureTimings] { RendererOptions o;
+            o.measureTimings = measureTimings; return o; }(), capacity)) {}
 
 void Renderer::drawScene(const FrameTransforms& transforms, const std::vector<SceneInstance>& objects) {
     impl->drawScene(transforms, objects);
 }
+bool Renderer::readCompletedSceneTiming(FrameTimings& result) { return impl->readCompletedSceneTiming(result); }
 
 void Renderer::captureNextFrame(const std::string& path) {impl->captureNextFrame(path);}
 

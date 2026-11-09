@@ -20,8 +20,10 @@
 
 namespace {
 using Clock = std::chrono::steady_clock;
-// A normal Windows sleep can round a 16.7 ms cap up to ~31 ms. This timer sleeps
-// precisely without busy-spinning or changing the system-wide timer resolution.
+constexpr bool PROFILE_REACTOR = false; // Set true, or use --profile; off in normal play.
+// A normal Windows sleep can round a 16.7 ms cap up to ~31 ms. This timer
+// sleeps precisely without busy-spinning or changing the system-wide timer
+// resolution.
 class FramePacer {
 #ifdef _WIN32
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
@@ -124,6 +126,17 @@ class CpuPrediction {
     }
 };
 
+void warmSnapshot(const prediction::Course &course, prediction::Request &request) {
+    // Construct a replay snapshot outside the timed region, not an
+    // unrealistically healthy reactor in the middle of a run. Never include its
+    // future RNG state.
+    uint32_t rng = 12345u ^ 0xa51ca6u;
+    for (uint32_t tick = prediction::REACTOR_TICK; tick <= request.worldTick;
+         tick += prediction::REACTOR_TICK)
+        request.reactor =
+            prediction::reactorStep(course, request.reactor, tick, request.routePower & 15u, rng);
+}
+
 void validateGpu(GpuPrediction &gpu, const prediction::Course &course) {
     unsigned cases = 0;
     for (uint32_t count : {1u, 63u, 64u, 65u, 512u, 2048u})
@@ -139,6 +152,14 @@ void validateGpu(GpuPrediction &gpu, const prediction::Course &course) {
             r.zMm = cases % 2 ? -5000 : 6000;
             r.verticalVelocity = cases % 2 ? 90 : -120;
             r.velocity = cases % 2 ? -20 : 15;
+            r.routePower = cases & 15u;
+            r.pulseCharges = cases % 3u;
+            r.pulseUntil = r.worldTick + (cases % 2u ? 0u : 36u);
+            warmSnapshot(course, r);
+            if (cases % 3u == 0u)
+                for (auto &word : r.reactor.words)
+                    word = 0xffffffffu; // All fault/age bits: test active and pulsed
+                                        // hazards.
             auto cpu = prediction::evaluate(course, r);
             if (!gpu.submit(r) || gpu.submit(r))
                 throw std::runtime_error("prediction busy contract failed");
@@ -153,23 +174,26 @@ void validateGpu(GpuPrediction &gpu, const prediction::Course &course) {
     std::cout << "PASS exact CPU/GPU tunnel aggregates: " << cases
               << " cases, 2/3/4 choices, partial groups and wrapped course\n";
 }
-void benchmark(GpuPrediction &gpu, const prediction::Course &course, const std::string &path) {
+void benchmark(GpuPrediction &gpu, const prediction::Course &course, const std::string &path,
+               bool frozen = false) {
     CpuPrediction cpu(course);
     std::ofstream file(path);
     if (!file)
         throw std::runtime_error("cannot open benchmark output");
-    std::string header =
-        "backend,section,choices,rollouts_per_choice,latency_ms,kernel_ms,rollouts_per_s,steps_per_"
-        "s,p0,p1,p2,p3,course_bytes,request_bytes,result_bytes,agreement\n";
+    std::string header = "mode,backend,section,choices,rollouts_per_choice,latency_ms,kernel_ms,"
+                         "rollouts_per_s,steps_per_"
+                         "s,p0,p1,p2,p3,course_bytes,request_bytes,result_bytes,agreement\n";
     file << header;
     std::cout << header;
     for (uint32_t count : {256u, 512u, 1024u})
         for (uint32_t stage : {0u, 1u, 4u}) {
             prediction::Request r;
+            r.routePower = frozen ? 256u : 0u;
             r.rollouts = count;
             r.junction = stage;
             r.worldTick = prediction::sectionStartTick(stage);
             r.routeCount = prediction::choices(course, stage);
+            warmSnapshot(course, r);
             auto reference = prediction::evaluate(course, r);
             for (unsigned backend = 0; backend < 2; ++backend) {
                 double latency = 0, kernel = 0;
@@ -194,10 +218,11 @@ void benchmark(GpuPrediction &gpu, const prediction::Course &course, const std::
                 for (const auto &route : last.routes)
                     steps += route.steps;
                 std::ostringstream row;
-                row << std::fixed << std::setprecision(6) << (backend ? "gpu" : "cpu") << ','
-                    << stage << ',' << r.routeCount << ',' << count << ',' << latency << ','
-                    << kernel << ',' << r.routeCount * count * 1000.0 / latency << ','
-                    << steps * 1000.0 / latency;
+                row << std::fixed << std::setprecision(6)
+                    << (frozen ? "frozen_diagnostic" : "reactor") << ','
+                    << (backend ? "gpu" : "cpu") << ',' << stage << ',' << r.routeCount << ','
+                    << count << ',' << latency << ',' << kernel << ','
+                    << r.routeCount * count * 1000.0 / latency << ',' << steps * 1000.0 / latency;
                 for (unsigned choice = 0; choice < 4; ++choice)
                     row << ',' << prediction::survival(last, choice);
                 row << ',' << sizeof(course) << ',' << sizeof(r) << ','
@@ -207,17 +232,19 @@ void benchmark(GpuPrediction &gpu, const prediction::Course &course, const std::
             }
         }
     std::cout << "Saved " << path
-              << ". Timings are not measured energy; payload excludes protocol overhead.\n";
+              << ". Timings are not measured energy; payload excludes protocol "
+                 "overhead.\n";
 }
 } // namespace
 int main(int argc, char **argv) {
     try {
         bool gpuBackend = true, selfTest = false, validate = false, bench = false, smoke = false,
-             autoplay = false;
+             autoplay = false, profile = PROFILE_REACTOR, noPrediction = false, frozen = false;
         int frameLimit = 0, captureFrame = 6, fpsLimit = 60;
-        uint32_t rollouts = 512, seed = 12345;
+        uint32_t rollouts = 1024, seed = 12345;
         bool seedSet = false;
-        std::string output = "build/tunnel-benchmark.csv", capture;
+        std::string output = "build/reactor-benchmark.csv", capture,
+                    profileOutput = "build/reactor-profile.csv";
         for (int i = 1; i < argc; ++i) {
             std::string flag = argv[i];
             auto value = [&]() -> std::string {
@@ -255,16 +282,32 @@ int main(int argc, char **argv) {
                 smoke = true;
             else if (flag == "--autoplay")
                 autoplay = true;
+            else if (flag == "--profile")
+                profile = true;
+            else if (flag == "--profile-output")
+                profileOutput = value();
+            else if (flag == "--no-prediction")
+                noPrediction = true;
+            else if (flag == "--freeze-reactor")
+                frozen = true;
             else if (flag == "--help") {
-                std::cout
-                    << "VOID / DIVE\nSpace/Enter starts or retries. A/D or mouse steers. No "
-                       "brakes.\n"
-                    << "R restart, Esc pause, F1 CPU/GPU, F2 route signs, F3 console/window "
-                       "stats.\n"
-                    << "--backend cpu|gpu --rollouts 512 --seed N --fps 60 --frames N\n"
-                    << "--autoplay --smoke --self-test --validate --benchmark [--output path]\n"
-                    << "--capture build/tunnel.bmp [--capture-frame 6] (one blocking debug "
-                       "frame)\n";
+                std::cout << "REACTOR / RUN\nSpace/Enter starts; Space pulses during "
+                             "play. WASD/mouse "
+                             "steers. No "
+                             "brakes.\n"
+                          << "R restart, Esc pause, F1 CPU/GPU, F2 route signs, F3 "
+                             "console/window "
+                             "stats.\n"
+                          << "--backend cpu|gpu --rollouts 1024 --seed N --fps 60 "
+                             "--frames N\n"
+                          << "--profile [--profile-output path] --no-prediction "
+                             "--freeze-reactor "
+                             "(diagnostic only)\n"
+                          << "--autoplay --smoke --self-test --validate --benchmark "
+                             "[--output path]\n"
+                          << "--capture build/tunnel.bmp [--capture-frame 6] (one "
+                             "blocking debug "
+                             "frame)\n";
                 return 0;
             } else
                 throw std::invalid_argument("unknown option: " + flag);
@@ -282,7 +325,7 @@ int main(int argc, char **argv) {
             survival::selfTest();
         if (selfTest && !validate && !bench)
             return 0;
-        Renderer renderer(1280, 720, "VOID / DIVE", survival::cubeMesh(), 24000);
+        Renderer renderer(1280, 720, "REACTOR / RUN", survival::cubeMesh(), 24000, profile);
         VkPhysicalDeviceProperties info{};
         vkGetPhysicalDeviceProperties(renderer.computeContext().physical, &info);
         std::cout << "[device] " << info.deviceName << " course_seed=" << seed << '\n';
@@ -293,17 +336,23 @@ int main(int argc, char **argv) {
                 return 0;
         }
         if (bench) {
-            benchmark(gpu, course, output);
+            benchmark(gpu, course, output, frozen);
             return 0;
         }
         GameInput input(renderer);
-        survival::Game game(course);
+        survival::Game game(course, (autoplay || smoke || profile) ? (seed ^ 0xa51ca6u) : 0);
         survival::Autopilot bot;
         CpuPrediction cpu(course);
         FramePacer pacer;
         survival::Guidance guidance;
         guidance.gpu = gpuBackend;
         guidance.rollouts = rollouts;
+        guidance.enabled = !noPrediction;
+        double physicsMs = 0, sceneMs = 0, drawMs = 0, sleepMs = 0, gpuRenderMs = 0, fenceMs = 0,
+               uploadMs = 0, forecastGpuMs = 0, forecastCpuMs = 0, forecastLatencyMs = 0;
+        unsigned gpuFrames = 0, forecastCount = 0, submitted = 0, maxStage = 0;
+        std::vector<double> profileFrames;
+        auto profileStart = Clock::now();
         std::vector<SceneInstance> scene;
         scene.reserve(24000);
         std::vector<double> frameTimes;
@@ -311,6 +360,7 @@ int main(int argc, char **argv) {
         double accumulator = 0, wallTime = 0, nextPrediction = 0, lastAccepted = -100;
         auto previous = Clock::now();
         uint32_t requestId = 0, validRun = 0, validSection = 0, accepted = 0;
+        uint32_t validPower = 0, validPulse = 0, validCharges = 0;
         bool jumpEdge = false, restartEdge = false;
         int frameNumber = 0;
         while (!renderer.shouldClose()) {
@@ -342,7 +392,8 @@ int main(int argc, char **argv) {
             if (!guidance.paused) {
                 if (!autoplay && !smoke)
                     game.look(controls.mouseX, controls.mouseY);
-                accumulator += smoke ? 20.0 / 120 : dt;
+                auto physicsStart = Clock::now();
+                accumulator += smoke ? 4.0 / 120 : dt;
                 jumpEdge |= controls.jump;
                 restartEdge |= controls.restart;
                 int catchup = 0;
@@ -356,17 +407,31 @@ int main(int argc, char **argv) {
                     game.step(step, 1.0f / 120);
                     jumpEdge = restartEdge = false;
                     accumulator -= 1.0 / 120;
-                    if (smoke && game.state().dead)
-                        throw std::runtime_error("smoke died: " + game.state().deathReason);
+                    maxStage = std::max(maxStage, game.state().stage);
                 }
                 if (catchup >= maxCatchup)
                     accumulator = 0;
+                if (profile)
+                    physicsMs +=
+                        std::chrono::duration<double, std::milli>(Clock::now() - physicsStart)
+                            .count();
             } else
                 accumulator = 0;
             prediction::Result result;
             auto accept = [&](const prediction::Result &r, bool fromGpu) {
+                if (profile) {
+                    ++forecastCount;
+                    forecastLatencyMs += r.latencyMs;
+                    if (fromGpu)
+                        forecastGpuMs += r.kernelMs;
+                    else
+                        forecastCpuMs += r.kernelMs;
+                }
                 const auto &state = game.state();
                 if (!guidance.enabled || fromGpu != guidance.gpu || !game.approachingJunction() ||
+                    (r.request.routePower & 15u) != state.routePower ||
+                    r.request.pulseUntil != state.pulseUntil ||
+                    r.request.pulseCharges != state.pulseCharges ||
                     !prediction::applies(r.request, state.run, game.decision(),
                                          unsigned(state.worldTime * 60)))
                     return;
@@ -382,6 +447,9 @@ int main(int argc, char **argv) {
                 guidance.valid = true;
                 validRun = state.run;
                 validSection = game.decision();
+                validPower = state.routePower;
+                validPulse = state.pulseUntil;
+                validCharges = state.pulseCharges;
                 lastAccepted = wallTime;
                 guidance.predictionMs = r.latencyMs;
                 guidance.kernelMs = fromGpu ? r.kernelMs : 0;
@@ -392,25 +460,53 @@ int main(int argc, char **argv) {
             if (gpu.poll(result))
                 accept(result, true);
             if (validRun != game.state().run || validSection != game.decision() ||
-                !game.approachingJunction() || wallTime - lastAccepted > .35)
+                validPower != game.state().routePower || validPulse != game.state().pulseUntil ||
+                validCharges != game.state().pulseCharges || !game.approachingJunction() ||
+                wallTime - lastAccepted > .35)
                 guidance.valid = false;
             if (!guidance.paused && guidance.enabled && game.approachingJunction() &&
                 wallTime >= nextPrediction && !cpu.busy() && !gpu.busy()) {
                 auto r = game.request(++requestId, rollouts);
+                if (frozen)
+                    r.routePower |= 256u;
                 if (guidance.gpu)
                     gpu.submit(r);
                 else
                     cpu.submit(r);
-                nextPrediction = wallTime + .1;
+                ++submitted;
+                nextPrediction = wallTime + .2;
             }
             guidance.pending = cpu.busy() || gpu.busy();
+            auto sceneStart = Clock::now();
             game.scene(scene, guidance);
+            if (profile)
+                sceneMs +=
+                    std::chrono::duration<double, std::milli>(Clock::now() - sceneStart).count();
             if (!capture.empty() && frameNumber == captureFrame)
                 renderer.captureNextFrame(capture);
+            auto drawStart = Clock::now();
             renderer.drawScene(game.transforms(renderer.aspectRatio()), scene);
+            if (profile) {
+                drawMs +=
+                    std::chrono::duration<double, std::milli>(Clock::now() - drawStart).count();
+                FrameTimings timing;
+                if (renderer.readCompletedSceneTiming(timing)) {
+                    ++gpuFrames;
+                    gpuRenderMs += timing.gpuRenderMs;
+                    fenceMs += timing.fenceWaitMs;
+                    uploadMs += timing.uploadMs;
+                }
+            }
+            auto sleepStart = Clock::now();
             if (fpsLimit > 0)
                 pacer.waitUntil(start + std::chrono::duration_cast<Clock::duration>(
                                             std::chrono::duration<double>(1.0 / fpsLimit)));
+            if (profile) {
+                sleepMs +=
+                    std::chrono::duration<double, std::milli>(Clock::now() - sleepStart).count();
+                profileFrames.push_back(
+                    std::chrono::duration<double, std::milli>(Clock::now() - start).count());
+            }
             frameTimes.push_back(
                 std::chrono::duration<double, std::milli>(Clock::now() - start).count());
             if (frameTimes.size() == 180) {
@@ -426,27 +522,64 @@ int main(int argc, char **argv) {
                           << " kernel_ms=" << guidance.kernelMs << " section=" << game.state().stage
                           << " speed=" << game.state().speed << " objects=" << scene.size() << '\n';
                 if (guidance.stats) {
-                    std::string title = "VOID / DIVE - " +
+                    std::string title = "REACTOR / RUN - " +
                                         std::to_string(int(1000 / guidance.frameMs)) + " FPS - " +
                                         (guidance.gpu ? "GPU" : "CPU");
                     input.title(title.c_str());
                 } else
-                    input.title("VOID / DIVE");
+                    input.title("REACTOR / RUN");
                 frameTimes.clear();
             }
             ++frameNumber;
-            if (smoke && game.state().stage >= 6) {
-                if (accepted < 3)
+            if (smoke && frameNumber >= 480) {
+                if (accepted < 3 || maxStage < 1)
                     throw std::runtime_error("live route guidance not connected");
-                std::cout << "PASS rendered dive: six opening decisions, speed="
-                          << game.state().speed << " accepted_predictions=" << accepted
+                std::cout << "PASS rendered reactor run: stages=" << maxStage
+                          << " speed=" << game.state().speed << " accepted_predictions=" << accepted
                           << " frames=" << frameNumber << '\n';
                 break;
             }
             if (frameLimit && frameNumber >= frameLimit)
                 break;
-            if (smoke && frameNumber > 2000)
-                throw std::runtime_error("dive smoke did not reach six opening forks");
+        }
+        if (profile && frameNumber > 0) {
+            double wallMs =
+                std::chrono::duration<double, std::milli>(Clock::now() - profileStart).count();
+            std::sort(profileFrames.begin(), profileFrames.end());
+            std::ofstream file(profileOutput);
+            if (!file)
+                throw std::runtime_error("cannot open profile output");
+            std::ostringstream summary;
+            summary << "backend,mode,frames,wall_ms,fps,p95_frame_ms,world_cpu_ms_"
+                       "per_frame,scene_"
+                       "cpu_ms_per_frame,"
+                       "draw_cpu_ms_per_frame,pacer_ms_per_frame,render_gpu_ms_per_"
+                       "frame,fence_ms_"
+                       "per_frame,"
+                       "upload_ms_per_frame,forecast_gpu_total_ms,forecast_cpu_total_"
+                       "ms,forecast_"
+                       "latency_mean_ms,"
+                       "requests,completed,accepted,request_bytes,result_bytes,"
+                       "telemetry_bytes\n";
+            summary << std::fixed << std::setprecision(6) << (gpuBackend ? "gpu" : "cpu") << ','
+                    << (noPrediction ? "off"
+                        : frozen     ? "frozen_diagnostic"
+                                     : "reactor")
+                    << ',' << frameNumber << ',' << wallMs << ',' << frameNumber * 1000 / wallMs
+                    << ','
+                    << profileFrames[std::min(profileFrames.size() - 1,
+                                              size_t(profileFrames.size() * .95))]
+                    << ',' << physicsMs / frameNumber << ',' << sceneMs / frameNumber << ','
+                    << drawMs / frameNumber << ',' << sleepMs / frameNumber << ','
+                    << gpuRenderMs / std::max(1u, gpuFrames) << ','
+                    << fenceMs / std::max(1u, gpuFrames) << ','
+                    << uploadMs / std::max(1u, gpuFrames) << ',' << forecastGpuMs << ','
+                    << forecastCpuMs << ',' << forecastLatencyMs / std::max(1u, forecastCount)
+                    << ',' << submitted << ',' << forecastCount << ',' << accepted << ','
+                    << sizeof(prediction::Request) << ',' << 4 * sizeof(prediction::Summary) << ','
+                    << sizeof(prediction::Telemetry) << '\n';
+            file << summary.str();
+            std::cout << "[reactor profile]\n" << summary.str();
         }
         return 0;
     } catch (const std::exception &error) {

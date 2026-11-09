@@ -7,6 +7,10 @@
 !docs/survival-game-results.csv
 !docs/tunnel-game-results.csv
 !docs/tunnel-long-results.csv
+!docs/reactor-escape.md
+!docs/reactor-results.csv
+!docs/reactor-frozen-results.csv
+!docs/reactor-profile-results.csv
 !glm/
 !glm/**
 !Libraries/
@@ -48,6 +52,7 @@
 !graphics/vulkan/shaders/prediction_kernel.inc
 !graphics/vulkan/shaders/tunnel_math.inc
 !graphics/vulkan/shaders/tunnel_config.inc
+!graphics/vulkan/shaders/reactor_kernel.inc
 !graphics/vulkan/tests/
 !graphics/vulkan/tests/nbody_test.cpp
 !graphics/vulkan/tests/benchmark.ps1

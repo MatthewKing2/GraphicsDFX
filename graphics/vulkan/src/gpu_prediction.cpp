@@ -1,4 +1,5 @@
 #include "gpu_prediction.hpp"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -35,6 +36,9 @@ class GpuPrediction::Impl {
     double timestampPeriod = 0;
     uint32_t timestampBits = 0;
     bool pending = false;
+    uint32_t batchBase = 0;
+    static constexpr uint32_t BATCH_SIZE = 128;
+    double totalKernelMs = 0;
     prediction::Request request;
     std::chrono::steady_clock::time_point started;
 
@@ -46,9 +50,7 @@ class GpuPrediction::Impl {
             throw;
         }
     }
-    ~Impl() {
-        destroy();
-    }
+    ~Impl() { destroy(); }
     void destroyBuffer(Buffer &b) {
         if (b.mapped)
             vkUnmapMemory(context.device, b.memory);
@@ -259,18 +261,25 @@ class GpuPrediction::Impl {
         prediction::validate(course, input);
         request = input;
         started = std::chrono::steady_clock::now();
+        batchBase = 0;
+        totalKernelMs = 0;
+        submitBatch();
+        return true;
+    }
+    void submitBatch() {
         check(vkResetFences(context.device, 1, &fence), "prediction fence reset");
         check(vkResetCommandBuffer(commands, 0), "prediction command reset");
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         check(vkBeginCommandBuffer(commands, &begin), "prediction begin");
-        vkCmdFillBuffer(commands, output.handle, 0,
-                        prediction::CHOICES * sizeof(prediction::Summary), 0);
+        if (batchBase == 0)
+            vkCmdFillBuffer(commands, output.handle, 0,
+                            prediction::CHOICES * sizeof(prediction::Summary), 0);
         VkMemoryBarrier clear{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        clear.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        clear.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         clear.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clear, 0, nullptr, 0,
-                             nullptr);
+        vkCmdPipelineBarrier(
+            commands, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &clear, 0, nullptr, 0, nullptr);
         if (queries) {
             vkCmdResetQueryPool(commands, queries, 0, 2);
             vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queries, 0);
@@ -278,9 +287,12 @@ class GpuPrediction::Impl {
         vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1,
                                 &set, 0, nullptr);
-        vkCmdPushConstants(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(request), &request);
-        vkCmdDispatch(commands, (request.rollouts + 63) / 64, request.routeCount, 1);
+        auto batch = request;
+        batch.routePower |= batchBase << 16u;
+        vkCmdPushConstants(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(batch),
+                           &batch);
+        const uint32_t count = std::min(BATCH_SIZE, request.rollouts - batchBase);
+        vkCmdDispatch(commands, (count + 63) / 64, request.routeCount, 1);
         if (queries)
             vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, queries, 1);
         VkMemoryBarrier transfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -302,7 +314,6 @@ class GpuPrediction::Impl {
         submitInfo.pCommandBuffers = &commands;
         check(vkQueueSubmit(context.queue, 1, &submitInfo, fence), "prediction submit");
         pending = true;
-        return true;
     }
     bool poll(prediction::Result &result) {
         if (!pending)
@@ -325,8 +336,14 @@ class GpuPrediction::Impl {
                   "prediction query read");
             const uint64_t mask =
                 timestampBits == 64 ? UINT64_MAX : (uint64_t(1) << timestampBits) - 1;
-            result.kernelMs = double((stamps[1] - stamps[0]) & mask) * timestampPeriod / 1000000.0;
+            totalKernelMs += double((stamps[1] - stamps[0]) & mask) * timestampPeriod / 1000000.0;
         }
+        if (batchBase + BATCH_SIZE < request.rollouts) {
+            batchBase += BATCH_SIZE;
+            submitBatch();
+            return false;
+        }
+        result.kernelMs = totalKernelMs;
         pending = false;
         return true;
     }
@@ -334,12 +351,6 @@ class GpuPrediction::Impl {
 GpuPrediction::GpuPrediction(ComputeContext context, const prediction::Course &course)
     : impl(std::make_unique<Impl>(context, course)) {}
 GpuPrediction::~GpuPrediction() = default;
-bool GpuPrediction::busy() const {
-    return impl->pending;
-}
-bool GpuPrediction::submit(const prediction::Request &r) {
-    return impl->submit(r);
-}
-bool GpuPrediction::poll(prediction::Result &r) {
-    return impl->poll(r);
-}
+bool GpuPrediction::busy() const { return impl->pending; }
+bool GpuPrediction::submit(const prediction::Request &r) { return impl->submit(r); }
+bool GpuPrediction::poll(prediction::Result &r) { return impl->poll(r); }

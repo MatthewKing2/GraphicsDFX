@@ -1,0 +1,4 @@
+backend,mode,frames,wall_ms,fps,p95_frame_ms,world_cpu_ms_per_frame,scene_cpu_ms_per_frame,draw_cpu_ms_per_frame,pacer_ms_per_frame,render_gpu_ms_per_frame,fence_ms_per_frame,upload_ms_per_frame,forecast_gpu_total_ms,forecast_cpu_total_ms,forecast_latency_mean_ms,requests,completed,accepted,request_bytes,result_bytes,telemetry_bytes
+gpu,off,600,10302.646400,58.237464,17.599500,0.006824,0.252063,0.700749,16.058409,0.087136,0.022903,0.142138,0.000000,0.000000,0.000000,0,0,0,128,64,64
+gpu,reactor,600,10296.053200,58.274757,17.502100,0.006659,0.255217,0.639789,15.959765,0.062504,0.027116,0.153681,6479.056288,0.000000,226.833961,42,41,40,128,64,64
+cpu,reactor,600,10257.561100,58.493437,17.352600,0.003648,0.145917,0.381446,16.478466,0.087385,0.014078,0.076833,0.000000,9512.345200,349.195946,29,28,21,128,64,64

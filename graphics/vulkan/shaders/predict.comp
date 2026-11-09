@@ -10,22 +10,27 @@ struct Route {
     uint choiceCount; uint seed; uint reactionTicks; uint lateralNoise;
     Obstacle obstacles[TUNNEL_OBSTACLES];
 };
+struct ReactorState { uint words[16]; };
 struct Request {
     uint id; uint courseVersion; uint run; uint junction;
     int xMm; int velocity; uint worldTick; uint seed;
-    uint rollouts; uint horizon; uint routeCount; uint reserved;
-    int zMm; int verticalVelocity; uint reserved2; uint reserved3;
+    uint rollouts; uint horizon; uint routeCount; uint routePower;
+    int zMm; int verticalVelocity; uint pulseUntil; uint pulseCharges;
+    ReactorState reactor;
 };
 struct Pose { int center; int cosine; int sine; int aperture; };
 struct Target { int x; int z; };
-layout(binding=0,std430) readonly buffer Course { Route routes[]; } course;
+layout(binding=0,std430) readonly buffer Course { Route routes[128]; uint reactorRules[128]; } course;
 layout(binding=1,std430) buffer Results { uvec4 totals[4]; } outputData;
 layout(push_constant) uniform Parameters { Request request; } parameters;
 #define COURSE_PARAM
+#define COURSE_ARG
+#define INOUT_UINT inout uint
 #include "prediction_kernel.inc"
 shared uvec4 partial[64];
 void main() {
-    uint index=gl_GlobalInvocationID.x,choice=gl_WorkGroupID.y,local=gl_LocalInvocationID.x;
+    uint index=gl_GlobalInvocationID.x+(parameters.request.routePower>>16u),
+         choice=gl_WorkGroupID.y,local=gl_LocalInvocationID.x;
     uvec4 sum=uvec4(0);
     if(index<parameters.request.rollouts) {
         RolloutResult r=rollout(parameters.request,choice,index);

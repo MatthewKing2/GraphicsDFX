@@ -5,6 +5,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 
@@ -173,7 +174,7 @@ void worldText(std::vector<SceneInstance> &scene, glm::vec3 center, const std::s
     }
 }
 void ring(std::vector<SceneInstance> &scene, float x, float y, float radius, float thickness,
-          glm::vec3 color) {
+          glm::vec3 color, float z = 0) {
     for (int side = 0; side < 8; ++side) {
         float angle = (side + .5f) * glm::radians(45.0f);
         glm::vec3 normal(std::cos(angle), 0, std::sin(angle)),
@@ -182,7 +183,7 @@ void ring(std::vector<SceneInstance> &scene, float x, float y, float radius, flo
         item.transform[0] = glm::vec4(tangent * (2 * radius * std::tan(glm::radians(22.5f))), 0);
         item.transform[1] = glm::vec4(0, thickness, 0, 0);
         item.transform[2] = glm::vec4(normal * .055f, 0);
-        item.transform[3] = glm::vec4(glm::vec3(x, y, 0) + normal * radius, 1);
+        item.transform[3] = glm::vec4(glm::vec3(x, y, z) + normal * radius, 1);
         item.tint = glm::vec4(color, 3);
         scene.push_back(item);
     }
@@ -236,7 +237,10 @@ float distanceAt(float seconds) {
 float routeCenter(const prediction::Course &course, unsigned stage, unsigned choice) {
     return prediction::laneCenter(prediction::choices(course, stage), choice) * .001f;
 }
-Game::Game(const prediction::Course &course) : data(course) {}
+Game::Game(const prediction::Course &course, unsigned replaySeed) : data(course) {
+    initialReactorSeed = replaySeed ? replaySeed : (std::random_device{}() | 1u);
+    reactorRng = initialReactorSeed;
+}
 void Game::look(float dx, float dy) {
     // Relative mouse movement steers the player, not a freely flying camera.
     float center =
@@ -252,6 +256,7 @@ void Game::restart(bool) {
     player.run = generation;
     player.best = best;
     player.title = false;
+    reactorRng = initialReactorSeed;
 }
 void Game::die(const char *why) {
     if (player.dead)
@@ -295,6 +300,18 @@ void Game::step(const GameControls &input, float dt) {
     player.worldTime = player.elapsed;
     player.speed = INITIAL_SPEED + FORWARD_ACCELERATION * player.elapsed;
     player.feet.y = distanceAt(player.elapsed);
+    const unsigned worldTick = unsigned(player.worldTime * 60);
+    while ((player.reactorTick + 1) * prediction::REACTOR_TICK <= worldTick) {
+        ++player.reactorTick;
+        player.reactor = prediction::reactorStep(data, player.reactor,
+                                                 player.reactorTick * prediction::REACTOR_TICK,
+                                                 player.routePower, reactorRng);
+    }
+    if (input.jump && player.pulseCharges && worldTick >= player.pulseUntil) {
+        --player.pulseCharges;
+        ++player.pulsesUsed;
+        player.pulseUntil = worldTick + prediction::PULSE_TICKS;
+    }
     const float phase = (player.elapsed - sectionStart) / duration;
     const float entry = prediction::entryTick(player.stage) / (duration * 60);
     const float merge = prediction::mergeTick(player.stage) / (duration * 60);
@@ -328,17 +345,33 @@ void Game::step(const GameControls &input, float dt) {
             return;
         }
         const auto &route = prediction::route(data, player.stage, unsigned(player.branch));
+        const float controlPhase =
+            (prediction::entryTick(player.stage) +
+             (prediction::mergeTick(player.stage) - prediction::entryTick(player.stage)) / 3u) /
+            (duration * 60);
+        const float controlWindow = 3.0f / (duration * 60);
+        if (!player.collectedControl && previousPhase <= controlPhase + controlWindow &&
+            phase >= controlPhase - controlWindow &&
+            (player.localX + 4) * (player.localX + 4) + (player.feet.z - 4) * (player.feet.z - 4) <
+                4) {
+            player.collectedControl = true;
+            player.routePower ^= 1u << (unsigned(player.branch) & 3u);
+            player.pulseCharges = std::min(prediction::MAX_PULSES, player.pulseCharges + 1);
+            player.pulseUntil = std::max(player.pulseUntil, worldTick + 36);
+            ++player.reroutes;
+        }
         for (unsigned event = 0; event < prediction::obstacleCount(player.stage); ++event) {
             float eventPhase = prediction::hazardTick(player.stage, event) / (duration * 60);
             // Test the whole visible hazard depth, not just its central plane.
             const float halfWindow = prediction::contactTicks(player.stage) / (duration * 60);
             if (previousPhase <= eventPhase + halfWindow && phase >= eventPhase - halfWindow) {
                 unsigned tick = unsigned(player.worldTime * 60);
-                if (prediction::blocked(route.obstacles[event],
-                                        int(std::round(player.localX * 1000)),
-                                        int(std::round(player.feet.z * 1000)), tick)) {
-                    const char *names[] = {"RED SPIKE", "SLIDING BLOCK", "ROTATING BLADE",
-                                           "CRUSHING PASSAGE"};
+                if (prediction::reactorBlocked(route.obstacles[event], player.reactor,
+                                               int(std::round(player.localX * 1000)),
+                                               int(std::round(player.feet.z * 1000)), tick,
+                                               player.pulseUntil)) {
+                    const char *names[] = {"BROKEN STRUT", "CARGO RAIL", "LIVE LASER GRID",
+                                           "INTERLOCK FAILURE"};
                     die(names[route.obstacles[event].kind]);
                     return;
                 }
@@ -353,26 +386,25 @@ void Game::step(const GameControls &input, float dt) {
         return;
     }
     if (phase >= 1) {
-        // Change coordinate systems only: preserve world position, target and velocity.
+        // Change coordinate systems only: preserve world position, target and
+        // velocity.
         player.mouseTarget += routeCenter(data, player.stage, unsigned(player.branch));
         player.localX = player.feet.x;
         ++player.stage;
         player.branch = -1;
+        player.collectedControl = false;
     }
 }
-uint32_t Game::decision() const {
-    return player.stage + (player.branch >= 0 ? 1u : 0u);
-}
-bool Game::approachingJunction() const {
-    return !player.title && !player.dead;
-}
+uint32_t Game::decision() const { return player.stage + (player.branch >= 0 ? 1u : 0u); }
+bool Game::approachingJunction() const { return !player.title && !player.dead; }
 prediction::Request Game::request(uint32_t id, uint32_t rollouts) const {
     prediction::Request r;
     r.id = id;
     r.run = player.run;
     r.junction = decision();
     // A next-fork preview assumes we arrive there at our current world-space x.
-    // It is conditional on surviving the current tunnel, not a forecast of our input.
+    // It is conditional on surviving the current tunnel, not a forecast of our
+    // input.
     r.xMm = int(std::round(player.feet.x * 1000));
     r.zMm = int(std::round(player.feet.z * 1000));
     r.velocity = std::clamp(int(std::round(player.lateralSpeed * 1000 / 60)),
@@ -383,7 +415,36 @@ prediction::Request Game::request(uint32_t id, uint32_t rollouts) const {
     r.rollouts = rollouts;
     r.routeCount = prediction::choices(data, r.junction);
     r.seed = 12345u ^ (r.junction * 0x9e3779b9u);
+    r.reactor = player.reactor;
+    r.routePower = player.routePower;
+    r.pulseUntil = player.pulseUntil;
+    r.pulseCharges = player.pulseCharges;
     return r;
+}
+prediction::Telemetry Game::telemetry() const {
+    prediction::Telemetry packet{};
+    packet.run = player.run;
+    packet.tick = unsigned(player.worldTime * 60);
+    packet.section = player.stage;
+    packet.routePower = player.routePower;
+    packet.pulseUntil = player.pulseUntil;
+    packet.pulseCharges = player.pulseCharges;
+    packet.version = prediction::COURSE_VERSION;
+    for (unsigned c = 0; c < 4; ++c)
+        for (unsigned e = 0; e < prediction::OBSTACLES; ++e) {
+            packet.current[c] |=
+                prediction::hazardLevel(player.reactor,
+                                        prediction::route(data, player.stage, c).obstacles[e])
+                << (e * 3);
+            packet.upcoming[c] |=
+                prediction::hazardLevel(player.reactor,
+                                        prediction::route(data, player.stage + 1, c).obstacles[e])
+                << (e * 3);
+        }
+    for (unsigned node = 0; node < prediction::RELAYS; ++node)
+        if (prediction::relayLevel(player.reactor, node) > 0)
+            ++packet.warningCount;
+    return packet;
 }
 FrameTransforms Game::transforms(float aspect) const {
     // Camera looks down the shaft. Geometry is rebased around the player each
@@ -398,9 +459,7 @@ FrameTransforms Game::transforms(float aspect) const {
     frame.projection[1][1] *= -1;
     return frame;
 }
-int Game::score() const {
-    return int(player.elapsed * 100);
-}
+int Game::score() const { return int(player.elapsed * 100); }
 
 void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) const {
     scene.clear();
@@ -414,9 +473,9 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
         float yMerge = distanceAt(start + prediction::mergeTick(stage) / 60.0f) - origin,
               yEnd = distanceAt(start + prediction::sectionTicks(stage) / 60.0f) - origin;
         auto count = prediction::choices(data, stage);
-        // Open shaft: cool blue. Inside passages: warm plum, with amber exit rims.
-        tube(scene, 0, 0, y0, yEntry, shaftApothem, {.022f, .055f, .085f});
-        tube(scene, 0, 0, yMerge, yEnd, shaftApothem, {.022f, .055f, .085f});
+        // Open shaft: cool green steel. Passages: rusty metal, with amber exit rims.
+        tube(scene, 0, 0, y0, yEntry, shaftApothem, {.026f, .047f, .042f});
+        tube(scene, 0, 0, yMerge, yEnd, shaftApothem, {.026f, .047f, .042f});
         ring(scene, 0, y0, shaftApothem, .09f, {.04f, .13f, .22f});
         // A dark bulkhead with 2..4 octagonal mouths, not a HUD route selector.
         object(scene, {0, yEntry, 30.0f}, {96, .45f, 39.0f}, {.018f, .02f, .032f});
@@ -434,6 +493,16 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
         for (unsigned choice = 0; choice < count; ++choice) {
             float x = prediction::laneCenter(count, choice) * .001f;
             mouthCorners(scene, x, yEntry);
+            worldText(scene, {x, yEntry - .5f, 18.5f}, std::string("BUS ") + char('A' + choice),
+                      .27f, {.75f, .48f, .12f});
+            for (unsigned lamp = 0; lamp < 8; ++lamp) {
+                auto age = prediction::relayLevel(player.reactor, choice * 32 + lamp);
+                glm::vec3 light = age >= 4 ? red
+                                  : age    ? glm::vec3(1, .45f, .04f)
+                                           : glm::vec3(.08f, .32f, .24f);
+                object(scene, {x + (float(lamp) - 3.5f) * .95f, yEntry - .3f, 11.8f},
+                       {.55f, .1f, .35f}, light, 3);
+            }
             auto rim = glm::vec3(.08f, .18f, .35f);
             if (stage == target && guidance.enabled && guidance.valid) {
                 float probability = guidance.percentages[choice];
@@ -443,18 +512,42 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                 if (guidance.recommended == int(choice))
                     rim = glm::vec3(.15f, .95f, .55f);
             }
-            tube(scene, x, x, yEntry, yMerge, tunnelApothem, {.085f, .033f, .067f});
+            tube(scene, x, x, yEntry, yMerge, tunnelApothem, {.073f, .049f, .027f});
             ring(scene, x, yEntry - .25f, tunnelApothem, .12f, rim);
-            // Inset the rim so it is visible in front of, not buried inside, the wall.
+            // Inset the rim so it is visible in front of, not buried inside, the
+            // wall.
             ring(scene, x, yMerge - .25f, tunnelApothem - .12f, .16f, {.65f, .23f, .09f});
             for (int band = 1; band < 21; ++band) {
                 float t = float(band) / 21;
                 ring(scene, x, yEntry + (yMerge - yEntry) * t, tunnelApothem, .055f,
-                     {.12f, .045f, .095f});
+                     {.13f, .09f, .045f});
+            }
+            for (int side : {-1, 1}) {
+                object(scene, {x + side * 9.3f, (yEntry + yMerge) * .5f, 1.5f},
+                       {.20f, yMerge - yEntry, .20f}, {.12f, .08f, .025f});
+                object(scene, {x + side * 9.3f, (yEntry + yMerge) * .5f, 1.7f},
+                       {.08f, yMerge - yEntry, .08f}, {.35f, .19f, .035f}, 3);
+                for (int stripe = 0; stripe < 5; ++stripe)
+                    object(scene, {x + side * (6.2f + stripe * .6f), yEntry - .3f, -9.0f},
+                           {.32f, .12f, .65f},
+                           stripe % 2 ? glm::vec3(.02f) : glm::vec3(.8f, .45f, .04f), 3);
+            }
+            float controlTime =
+                start + (prediction::entryTick(stage) +
+                         (prediction::mergeTick(stage) - prediction::entryTick(stage)) / 3u) /
+                            60.0f;
+            if (stage != player.stage || !player.collectedControl) {
+                float cy = distanceAt(controlTime) - origin;
+                ring(scene, x - 4, cy, 2, .1f, {.12f, .9f, .42f}, 4);
+                worldText(scene, {x - 4, cy - .1f, 6.8f}, "REROUTE", .13f, {.12f, .8f, .35f});
             }
             const auto &route = prediction::route(data, stage, choice);
             for (unsigned event = 0; event < prediction::obstacleCount(stage); ++event) {
-                const auto &o = route.obstacles[event];
+                const auto &base = route.obstacles[event];
+                unsigned tick = unsigned(player.worldTime * 60);
+                unsigned age = prediction::hazardLevel(player.reactor, base);
+                const auto o =
+                    prediction::reactorObstacle(base, player.reactor, tick, player.pulseUntil);
                 const auto pose = prediction::pose(o, unsigned(player.worldTime * 60));
                 float y = distanceAt(start + prediction::hazardTick(stage, event) / 60.0f) - origin;
                 float eventTime = start + prediction::hazardTick(stage, event) / 60.0f;
@@ -488,26 +581,44 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                     blade.transform[2] = glm::vec4(-s * TUNNEL_BLADE_HALF_THICKNESS * .002f, 0,
                                                    c * TUNNEL_BLADE_HALF_THICKNESS * .002f, 0);
                     blade.transform[3] = glm::vec4(cx, y, 0, 1);
-                    blade.tint = glm::vec4(red, 1);
-                    scene.push_back(blade);
+                    bool active = tick >= player.pulseUntil && age >= 4;
+                    blade.tint = glm::vec4(active ? red : glm::vec3(.8f, .45f, .02f), 3);
+                    if (!active)
+                        blade.transform[2] *= .045f;
+                    if (active || age > 0)
+                        scene.push_back(blade);
                     object(scene, {cx, y - depth * .5f - .02f, 0}, {.16f, .05f, .16f},
-                           {1, .5f, .1f}, 3);
+                           active ? red : glm::vec3(.1f, .4f, .3f), 3);
+                    object(scene, {cx + c * base.extent * .001f, y, s * base.extent * .001f},
+                           {.65f, depth, .65f}, {.12f, .14f, .13f});
+                    object(scene, {cx - c * base.extent * .001f, y, -s * base.extent * .001f},
+                           {.65f, depth, .65f}, {.12f, .14f, .13f});
                 } else {
                     float gap = pose.aperture * .001f;
+                    glm::vec3 warning = tick < player.pulseUntil ? glm::vec3(.1f, .7f, 1)
+                                        : age >= 4               ? red
+                                        : age                    ? glm::vec3(1, .45f, .025f)
+                                                                 : glm::vec3(.1f, .6f, .35f);
                     for (int side : {-1, 1}) {
                         // Extend each moving edge to its own wall, including center offset.
                         float width =
                             std::max(.01f, tunnelRadius - side * pose.center * .001f - gap);
                         object(scene, {cx + side * (gap + width * .5f), y, 0},
-                               {width, depth, tunnelRadius * 2}, {.55f, .035f, .2f});
+                               {width, depth, tunnelRadius * 2}, {.14f, .12f, .065f});
                         object(scene, {cx + side * gap, y - depth * .5f - .02f, 0},
-                               {.14f, .04f, gap * 2}, red, 3);
+                               {.14f, .04f, gap * 2}, warning, 3);
                         float height = std::max(.01f, tunnelRadius - gap);
                         object(scene, {cx, y, side * (gap + height * .5f)},
-                               {gap * 2, depth, height}, {.55f, .035f, .2f});
+                               {gap * 2, depth, height}, {.14f, .12f, .065f});
                         object(scene, {cx, y - depth * .5f - .02f, side * gap},
-                               {gap * 2, .04f, .14f}, red, 3);
+                               {gap * 2, .04f, .14f}, warning, 3);
                     }
+                    worldText(scene, {cx, y - depth * .5f - .03f, 10.0f},
+                              tick < player.pulseUntil ? "PULSE"
+                              : age >= 4               ? "CLOSING"
+                              : age                    ? "WARNING"
+                                                       : "INTERLOCK",
+                              .15f, warning);
                 }
             }
             if (stage == target && guidance.enabled && !player.title) {
@@ -515,11 +626,18 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                     guidance.valid
                         ? std::to_string(int(std::round(guidance.percentages[choice] * 100))) + "%"
                         : "...";
-                worldText(scene, {x, yEntry - .8f, 12.9f}, label, .51f,
+                worldText(scene, {x, yEntry - .8f, 14.3f}, label, .51f,
                           guidance.valid ? rim : glm::vec3(.15f, .25f, .4f));
             }
         }
     }
+    // Physical pulse cells on a small cockpit brace, not a screen-space HUD.
+    for (unsigned cell = 0; cell < 2; ++cell)
+        object(scene, {player.feet.x + .9f + cell * .25f, 2.8f, player.feet.z - 1.5f},
+               {.16f, .40f, .12f},
+               cell < player.pulseCharges ? glm::vec3(.1f, .8f, 1) : glm::vec3(.035f), 3);
+    if (unsigned(player.worldTime * 60) < player.pulseUntil)
+        ring(scene, player.feet.x, 2.5f, 1.5f, .04f, {.12f, .6f, 1}, player.feet.z);
     // Sparse streaks emphasize acceleration without particle buffers or effects.
     for (int index = 0; index < 20; ++index) {
         float angle = index * 2.399963f;
@@ -533,7 +651,7 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
     if (player.title || player.dead || guidance.paused) {
         rectangle(scene, 245, 190, 790, 340, {.008f, .012f, .023f});
         rectangle(scene, 245, 190, 790, 3, player.dead ? red : cyan);
-        screenText(scene, 300, 225, player.dead ? "SHATTERED" : "VOID / DIVE", 7,
+        screenText(scene, 300, 225, player.dead ? "SYSTEM LOST" : "REACTOR / RUN", 7,
                    player.dead ? red : white);
         if (player.dead) {
             screenText(scene, 300, 315, player.deathReason, 3, violet);
@@ -548,8 +666,8 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
             screenText(scene, 300, 420, "ESC TO KEEP FALLING", 3, white);
         } else {
             screenText(scene, 300, 315, "WASD OR MOUSE: STEER", 3, cyan);
-            screenText(scene, 300, 355, "NO BRAKES. PICK A TUNNEL.", 3, white);
-            screenText(scene, 300, 400, "NUMBERS ARE MODEL ESTIMATES", 2, violet);
+            screenText(scene, 300, 355, "SPACE: EMERGENCY PULSE", 3, white);
+            screenText(scene, 300, 400, "GREEN RINGS: REROUTE POWER", 2, violet);
             screenText(scene, 300, 470, "SPACE TO DIVE", 4, white);
         }
     }
@@ -561,214 +679,172 @@ GameControls Autopilot::sample(const Game &game) {
         controls.jump = true;
         return controls;
     }
-    if (run != p.run)
+    if (run != p.run) {
         run = p.run;
-    int target = 0;
+        section = ~0u;
+    }
+    auto tick = unsigned(p.worldTime * 60);
+    prediction::Target target{0, 0};
     if (p.branch < 0) {
-        auto count = prediction::choices(game.course(), p.stage);
-        // Choose the best modeled option once per section without peeking at any
-        // game RNG. Prefer the guaranteed-clear center line for the test driver.
-        for (unsigned c = 0; c < count; ++c) {
-            const auto &route = prediction::route(game.course(), p.stage, c);
-            if (route.obstacles[0].kind == 0 && route.obstacles[0].offset == -7200 &&
-                route.obstacles[1].kind == 0 && route.obstacles[1].offset == 7200) {
-                target = prediction::laneCenter(count, c);
+        if (section != p.stage) {
+            section = p.stage;
+            targetChoice = 0;
+            int best = 2147483647;
+            for (unsigned c = 0; c < prediction::choices(game.course(), p.stage); ++c) {
+                const auto &route = prediction::route(game.course(), p.stage, c);
+                int cost = int(
+                    std::abs(prediction::laneCenter(route.choiceCount, c) * .001f - p.localX) * 20);
+                for (unsigned e = 0; e < prediction::obstacleCount(p.stage); ++e)
+                    cost += int(prediction::hazardLevel(p.reactor, route.obstacles[e])) * 100;
+                if (cost < best) {
+                    best = cost;
+                    targetChoice = c;
+                }
+            }
+        }
+        target.x =
+            prediction::laneCenter(prediction::choices(game.course(), p.stage), targetChoice);
+    } else {
+        const auto &route = prediction::route(game.course(), p.stage, unsigned(p.branch));
+        auto start = prediction::sectionStartTick(p.stage);
+        for (unsigned e = 0; e < prediction::obstacleCount(p.stage); ++e) {
+            auto arrival = start + prediction::hazardTick(p.stage, e);
+            if (tick <= arrival + prediction::contactTicks(p.stage)) {
+                target = prediction::reactorTarget(route, p.reactor, int(p.localX * 1000),
+                                                   int(p.feet.z * 1000), arrival, e, p.pulseUntil);
+                if (arrival <= tick + 18 && route.obstacles[e].kind == 3 &&
+                    prediction::hazardLevel(p.reactor, route.obstacles[e]) >= 5 && p.pulseCharges &&
+                    tick >= p.pulseUntil)
+                    controls.jump = true;
                 break;
             }
         }
     }
-    float desired = std::clamp((target * .001f - p.localX) * 8.0f, -STEER_SPEED, STEER_SPEED);
-    controls.strafe = desired / STEER_SPEED;
-    controls.vertical = std::clamp(-p.feet.z * 8.0f / STEER_SPEED, -1.0f, 1.0f);
-    // When centered, avoid the mouse controller retaining a prior extreme target.
+    controls.strafe = std::clamp((target.x * .001f - p.localX) * 8 / STEER_SPEED, -1.0f, 1.0f);
+    controls.vertical = std::clamp((target.z * .001f - p.feet.z) * 8 / STEER_SPEED, -1.0f, 1.0f);
     if (std::abs(controls.strafe) < .011f)
         controls.strafe = 0;
+    if (std::abs(controls.vertical) < .011f)
+        controls.vertical = 0;
     return controls;
 }
 void selfTest() {
+    auto require = [](bool condition, const char *message) {
+        if (!condition)
+            throw std::runtime_error(message);
+    };
     auto course = prediction::makeCourse();
-    bool counts[5] = {};
-    bool kinds[4] = {};
+    prediction::Request r;
+    r.rollouts = 32;
+    r.routeCount = prediction::choices(course, 0);
+    prediction::validate(course, r);
+    bool counts[5] = {}, kinds[4] = {};
     for (unsigned stage = 0; stage < 32; ++stage) {
         counts[prediction::choices(course, stage)] = true;
+        require(prediction::sectionStartTick(stage + 1) ==
+                    prediction::sectionStartTick(stage) + prediction::sectionTicks(stage),
+                "course timing gap");
         for (unsigned c = 0; c < prediction::choices(course, stage); ++c)
             for (const auto &o : prediction::route(course, stage, c).obstacles)
                 kinds[o.kind] = true;
     }
-    for (unsigned count = 2; count <= 4; ++count)
-        if (!counts[count])
-            throw std::runtime_error("missing fork count");
-    for (bool present : kinds)
-        if (!present)
-            throw std::runtime_error("missing obstacle kind");
-    Game game(course);
-    Autopilot bot;
-    unsigned boundaries = 0;
-    for (int tick = 0; tick < 120 * 60 && game.state().stage < 6; ++tick) {
-        float previousX = game.state().feet.x;
-        float previousZ = game.state().feet.z, previousVZ = game.state().verticalSpeed;
-        unsigned previousStage = game.state().stage;
-        bool wasTitle = game.state().title;
-        auto controls = bot.sample(game);
-        float end = (prediction::sectionStartTick(previousStage) +
-                     prediction::sectionTicks(previousStage)) /
-                    60.0f;
-        // Cross exits while still moving vertically, not only at rest in the center.
-        if (game.state().elapsed > end - .2f)
-            controls.vertical = .25f;
-        game.step(controls, 1.0f / 120);
-        if (game.state().dead)
-            throw std::runtime_error("test driver died: " + game.state().deathReason);
-        if (!wasTitle && !game.state().dead &&
-            (std::abs(game.state().feet.x - previousX - game.state().lateralSpeed / 120) > .0001f ||
-             std::abs(game.state().feet.z - previousZ - game.state().verticalSpeed / 120) >
-                 .0001f ||
-             std::abs(game.state().verticalSpeed - previousVZ) > STEER_ACCELERATION / 120 + .001f))
-            throw std::runtime_error("automatic lateral movement/recentering detected");
-        if (game.state().stage != previousStage)
-            ++boundaries;
+    require(counts[2] && counts[3] && counts[4] && kinds[0] && kinds[1] && kinds[2] && kinds[3],
+            "missing route/hazard variation");
+    prediction::ReactorState healthy{}, failed{};
+    for (auto &word : failed.words)
+        word = ~0u;
+    prediction::Obstacle gate{3, 0, 8, 0, 0, 9300, 0, 9300}, laser{2, 0, 8, 0, 0, 8400, 0, 0};
+    require(!prediction::reactorBlocked(gate, healthy, 0, 0, 10, 0),
+            "healthy interlock blocks player");
+    require(prediction::reactorBlocked(gate, failed, 0, 0, 10, 0), "failed interlock not closed");
+    require(!prediction::reactorBlocked(gate, failed, 0, 0, 10, 82), "pulse does not open gate");
+    require(!prediction::reactorBlocked(laser, healthy, 0, 0, 10, 0) &&
+                prediction::reactorBlocked(laser, failed, 0, 0, 10, 0) &&
+                !prediction::reactorBlocked(laser, failed, 0, 0, 10, 82),
+            "laser/pulse boundary");
+    require(!prediction::reactorBlocked(laser, failed, 0, 4000, 0, 0),
+            "vertical laser escape broken");
+    unsigned a = 12345, b = a, c = a;
+    prediction::ReactorState x{}, y{}, boost{};
+    for (unsigned tick = 6; tick <= 600; tick += 6) {
+        x = prediction::reactorStep(course, x, tick, 0, a);
+        y = prediction::reactorStep(course, y, tick, 0, b);
+        boost = prediction::reactorStep(course, boost, tick, 1, c);
     }
-    if (game.state().stage < 6 || game.state().dead || game.state().deaths)
-        throw std::runtime_error("viable tunnel sequence cannot be steered");
-    if (game.state().speed <= INITIAL_SPEED + 20)
-        throw std::runtime_error("forward speed not increasing");
-    if (boundaries != 6)
-        throw std::runtime_error("missing section-boundary coverage");
-    std::cout
-        << "PASS six opening tunnels, acceleration and continuous horizontal/vertical motion\n";
-    for (int tick = 0; tick < 120 * 45 && !game.state().dead; ++tick)
-        game.step(bot.sample(game), 1.0f / 120);
-    if (!game.state().dead || game.state().elapsed > 90)
-        throw std::runtime_error("late-game ramp does not challenge the seeded test pilot");
-    std::cout << "PASS seeded test pilot overwhelmed at " << game.state().elapsed << " seconds\n";
-    std::cout << "PASS seeded 2/3/4-way forks and all four obstacle kinds\n";
-    for (unsigned section = 0; section < 48; ++section) {
-        if (prediction::sectionStartTick(section + 1) !=
-            prediction::sectionStartTick(section) + prediction::sectionTicks(section))
-            throw std::runtime_error("noncontiguous ramping course");
-        if (section && prediction::sectionTicks(section) > prediction::sectionTicks(section - 1))
-            throw std::runtime_error("reaction windows do not tighten with progress");
-        if (prediction::hazardTick(section, 0) <= prediction::entryTick(section) ||
-            prediction::hazardTick(section, prediction::obstacleCount(section) - 1) +
-                    prediction::contactTicks(section) >=
-                prediction::mergeTick(section))
-            throw std::runtime_error("hazards outside tunnel");
-        for (unsigned event = 1; event < prediction::obstacleCount(section); ++event)
-            if (prediction::hazardTick(section, event) -
-                    prediction::hazardTick(section, event - 1) <=
-                2 * prediction::contactTicks(section))
-                throw std::runtime_error("overlapping hazard contact windows");
+    bool identical = true, different = false, nonzero = false;
+    for (unsigned w = 0; w < 16; ++w) {
+        identical &= x.words[w] == y.words[w];
+        different |= x.words[w] != boost.words[w];
+        nonzero |= x.words[w] != 0;
     }
-    if (INITIAL_SPEED != 27 || INITIAL_SPEED + 60 * FORWARD_ACCELERATION < 500 ||
-        prediction::sectionStartTick(12) != 60 * 60 || prediction::entryTick(12) > 18)
-        throw std::runtime_error("one-minute speed/reaction ramp regressed");
-    std::vector<SceneInstance> corners;
-    mouthCorners(corners, 0, 0);
-    if (corners.size() != 8)
-        throw std::runtime_error("missing mouth corner fillers");
-    for (int ix = -4; ix <= 4; ++ix)
-        for (int iz = -4; iz <= 4; ++iz) {
-            float x = ix * tunnelRadius / 5, z = iz * tunnelRadius / 5;
-            bool covered = false;
-            for (const auto &piece : corners) {
-                const auto &m = piece.transform;
-                float dx = x - m[3].x, dz = z - m[3].z;
-                float determinant = m[0].x * m[2].z - m[0].z * m[2].x;
-                float localX = (dx * m[2].z - dz * m[2].x) / determinant;
-                float localZ = (m[0].x * dz - m[0].z * dx) / determinant;
-                covered |= localZ >= -.50001f && localZ <= .50001f &&
-                           std::abs(localX) <= .25f - .5f * localZ + .00001f;
-            }
-            bool opening = prediction::withinTube(int(std::round(x * 1000)),
-                                                  int(std::round(z * 1000)), TUNNEL_RADIUS);
-            if (covered == opening)
-                throw std::runtime_error("octagonal mouth coverage mismatch");
-        }
-    std::cout << "PASS solid octagonal mouth corners and one-minute pacing\n";
-    for (float direction : {-1.0f, 1.0f}) {
-        Game vertical(course);
-        vertical.restart();
-        GameControls controls;
-        controls.vertical = direction;
-        for (int tick = 0; tick < 30; ++tick)
-            vertical.step(controls, 1.0f / 120);
-        auto request = vertical.request(1, 64);
-        if (vertical.state().dead || vertical.state().feet.z * direction < 4 ||
-            request.zMm * direction <= 0 || request.verticalVelocity * direction <= 0 ||
-            vertical.state().feet.y < 4)
-            throw std::runtime_error("vertical input or prediction state broken");
+    require(identical && different && nonzero, "circuit determinism or rerouting broken");
+    for (unsigned node = 0; node < 128; ++node)
+        require(prediction::relayLevel(x, node) <= 7, "age overflow");
+    std::cout << "PASS coupled 128-relay state, deterministic streams, warning "
+                 "ages, rerouting and "
+                 "pulse overrides\n";
+    auto result = prediction::evaluate(course, r), repeat = prediction::evaluate(course, r);
+    require(prediction::sameResults(result, repeat), "forecast not deterministic");
+    r.reactor = failed;
+    r.pulseCharges = 0;
+    auto damaged = prediction::evaluate(course, r);
+    require(!prediction::sameResults(result, damaged), "predictor ignores reactor snapshot");
+    std::cout << "PASS forecast depends on supplied circuit state (not a "
+                 "decorative simulation)\n";
+    Game game(course, 12345);
+    game.restart();
+    GameControls pulse;
+    pulse.jump = true;
+    game.step(pulse, 1.0f / 120);
+    require(game.state().pulseCharges == 1 && game.state().pulsesUsed == 1,
+            "pulse input not consumed");
+    for (unsigned tick = 0; tick < 120 * 12 && game.state().reroutes == 0 && !game.state().dead;
+         ++tick) {
+        GameControls input;
+        float targetX = game.state().branch < 0 ? -12.0f : -4.0f;
+        float targetZ = game.state().branch < 0 ? 0.0f : 4.0f;
+        input.strafe = std::clamp((targetX - game.state().localX) * 8 / STEER_SPEED, -1.0f, 1.0f);
+        input.vertical = std::clamp((targetZ - game.state().feet.z) * 8 / STEER_SPEED, -1.0f, 1.0f);
+        float beforeX = game.state().feet.x, beforeZ = game.state().feet.z;
+        game.step(input, 1.0f / 120);
+        if (!game.state().dead)
+            require(std::abs(game.state().feet.x - beforeX - game.state().lateralSpeed / 120) <
+                            .0001f &&
+                        std::abs(game.state().feet.z - beforeZ - game.state().verticalSpeed / 120) <
+                            .0001f,
+                    "automatic steering/recentering");
     }
-    Game mouse(course);
-    mouse.restart();
-    mouse.look(0, -100);
-    for (int tick = 0; tick < 30; ++tick)
-        mouse.step({}, 1.0f / 120);
-    if (mouse.state().feet.z < 1)
-        throw std::runtime_error("vertical mouse input ignored");
-    prediction::Obstacle blade{2, 0, 7, 0, 0, 8400, 0, 0};
-    if (!prediction::blocked(blade, 0, 0, 0) || prediction::blocked(blade, 0, 4000, 0) ||
-        !prediction::withinTube(0, prediction::TUNNEL_LIMIT, prediction::TUNNEL_LIMIT) ||
-        prediction::withinTube(prediction::TUNNEL_LIMIT, prediction::TUNNEL_LIMIT,
-                               prediction::TUNNEL_LIMIT))
-        throw std::runtime_error("vertical blade clearance/octagonal walls broken");
-    std::cout
-        << "PASS WASD/mouse vertical motion, blade escape, octagonal walls and ramping timings\n";
-    Game noBrake(course);
-    noBrake.restart();
-    GameControls backwards;
-    for (int tick = 0; tick < 60; ++tick)
-        noBrake.step(backwards, 1.0f / 120);
-    if (noBrake.state().feet.y < 8)
-        throw std::runtime_error("backward input brakes falling");
-    for (int tick = 0; tick < 840; ++tick)
-        noBrake.step(backwards, 1.0f / 120);
-    if (!noBrake.state().dead)
-        throw std::runtime_error("missing a fork is not lethal");
-    prediction::Obstacle sealed{3, 0, 7, 0, 0, 90, 0, 60};
-    for (int x = -prediction::TUNNEL_LIMIT; x <= prediction::TUNNEL_LIMIT; x += 100)
-        for (unsigned tick = 0; tick < 128; tick += 8)
-            if (!prediction::blocked(sealed, x, 0, tick))
-                throw std::runtime_error("sealed path not lethal");
-    prediction::Request r;
-    r.routeCount = prediction::choices(course, 0);
-    auto a = prediction::evaluate(course, r), b = prediction::evaluate(course, r);
-    if (!prediction::sameResults(a, b))
-        throw std::runtime_error("rollout nondeterministic");
-    int impossible = 0;
-    for (unsigned stage = 0; stage < 16; ++stage) {
-        r.junction = stage;
-        r.worldTick = prediction::sectionStartTick(stage);
-        r.routeCount = prediction::choices(course, stage);
-        auto result = prediction::evaluate(course, r);
-        bool anyViable = false;
-        for (unsigned c = 0; c < r.routeCount; ++c) {
-            if (prediction::survival(result, c) > .2f)
-                anyViable = true;
-            if (result.routes[c].survived == 0)
-                ++impossible;
-        }
-        if (!anyViable && stage < 6)
-            throw std::runtime_error("predictor finds no viable opening");
-    }
-    if (!impossible)
-        throw std::runtime_error("no genuinely impossible choices");
-    std::cout << "PASS geometric rollout survival, impossible choices and deterministic streams\n";
-    r.junction = 0;
-    r.routeCount = prediction::choices(course, 0);
-    r.worldTick = prediction::ENTRY_TICK - 1;
-    r.xMm = prediction::laneCenter(r.routeCount, 0);
-    auto aligned = prediction::evaluate(course, r);
-    r.xMm = prediction::laneCenter(r.routeCount, 1);
-    auto moved = prediction::evaluate(course, r);
-    if (aligned.routes[0].survived <= moved.routes[0].survived)
-        throw std::runtime_error("guidance no longer depends on live player alignment");
-    std::cout << "PASS live position-dependent probabilities retained\n";
+    require(game.state().reroutes == 1 && game.state().routePower == 1 &&
+                game.state().pulseCharges == 2,
+            "control-ring pickup did not reroute/recharge");
+    auto packet = game.telemetry();
+    require(sizeof(packet) == 64 && packet.routePower == 1, "compressed telemetry invalid");
+    for (unsigned choice = 0; choice < 4; ++choice)
+        for (unsigned e = 0; e < 10; ++e)
+            require(((packet.current[choice] >> (3 * e)) & 7) ==
+                        prediction::hazardLevel(
+                            game.state().reactor,
+                            prediction::route(course, game.state().stage, choice).obstacles[e]),
+                    "telemetry compression lost hazard state");
+    auto snapshot = game.request(2, 32);
+    require(snapshot.routePower == 1 && snapshot.reactor.words[0] == game.state().reactor.words[0],
+            "request missing live reactor state");
+    std::cout << "PASS actual pulse, ring pickup, recharge, live snapshot and "
+                 "64-byte telemetry\n";
+    std::vector<SceneInstance> pieces;
+    mouthCorners(pieces, 0, 0);
+    require(pieces.size() == 8, "missing octagonal mouth corner geometry");
+    require(prediction::withinTube(0, prediction::TUNNEL_LIMIT, prediction::TUNNEL_LIMIT) &&
+                !prediction::withinTube(prediction::TUNNEL_LIMIT, prediction::TUNNEL_LIMIT,
+                                        prediction::TUNNEL_LIMIT),
+            "octagonal collision broken");
     r.run = 4;
     r.junction = 0;
     r.worldTick = 10;
-    if (!prediction::applies(r, 4, 0, 20) || prediction::applies(r, 5, 0, 20) ||
-        prediction::applies(r, 4, 1, 20) || prediction::applies(r, 4, 0, 45))
-        throw std::runtime_error("stale result accepted");
-    std::cout << "PASS stale run/junction/age rejection\n";
+    require(prediction::applies(r, 4, 0, 20) && !prediction::applies(r, 5, 0, 20) &&
+                !prediction::applies(r, 4, 0, 45),
+            "stale forecast accepted");
+    std::cout << "PASS octagonal geometry, two-axis motion and stale-result "
+                 "rejection\n";
 }
 } // namespace survival

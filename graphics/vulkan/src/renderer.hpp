@@ -87,8 +87,10 @@ public:
     ~Renderer();
 
     Renderer(std::uint32_t width, std::uint32_t height, const char* title,
-        const Mesh& mesh, std::uint32_t instanceCapacity);
+        const Mesh& mesh, std::uint32_t instanceCapacity, bool measureTimings = false);
     void drawScene(const FrameTransforms&, const std::vector<SceneInstance>&);
+    // Completed frame-slot timings; never adds a wait/readback to the render loop.
+    bool readCompletedSceneTiming(FrameTimings&);
     // Debug-only: the next submitted scene frame is copied to a BMP. This one
     // frame waits for readback; normal interactive rendering never does this.
     void captureNextFrame(const std::string& path);

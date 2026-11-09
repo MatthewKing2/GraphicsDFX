@@ -12,6 +12,10 @@ struct State {
     float verticalSpeed = 0, mouseVerticalTarget = 0;
     float elapsed = 0, worldTime = 0, speed = INITIAL_SPEED, best = 0;
     bool title = true, dead = false;
+    prediction::ReactorState reactor;
+    unsigned reactorTick = 0, routePower = 0, pulseUntil = 0, pulseCharges = prediction::MAX_PULSES;
+    unsigned pulsesUsed = 0, reroutes = 0;
+    bool collectedControl = false;
     unsigned stage = 0, run = 1, deaths = 0;
     int branch = -1;
     std::string deathReason;
@@ -21,33 +25,32 @@ struct Guidance {
     int recommended = 0;
     float percentages[prediction::CHOICES] = {};
     double predictionMs = 0, kernelMs = 0, frameMs = 0, p95Ms = 0;
-    uint32_t rollouts = 512, horizon = prediction::HORIZON;
+    uint32_t rollouts = 1024, horizon = prediction::HORIZON;
 };
 float distanceAt(float seconds);
 float routeCenter(const prediction::Course &, unsigned stage, unsigned choice);
 Mesh cubeMesh();
 class Game {
   public:
-    explicit Game(const prediction::Course &);
+    explicit Game(const prediction::Course &, unsigned replaySeed = 0);
     void look(float dx, float dy);
     void step(const GameControls &, float dt);
     void restart(bool fromBeginning = true);
     FrameTransforms transforms(float aspect) const;
-    const State &state() const {
-        return player;
-    }
-    const prediction::Course &course() const {
-        return data;
-    }
+    const State &state() const { return player; }
+    const prediction::Course &course() const { return data; }
     bool approachingJunction() const;
     uint32_t decision() const;
     prediction::Request request(uint32_t id, uint32_t rollouts) const;
+    prediction::Telemetry telemetry() const;
     void scene(std::vector<SceneInstance> &, const Guidance &) const;
     int score() const;
 
   private:
     prediction::Course data;
     State player;
+    unsigned reactorRng = 0;
+    unsigned initialReactorSeed = 0;
     void die(const char *);
 };
 class Autopilot {
@@ -56,6 +59,7 @@ class Autopilot {
 
   private:
     unsigned run = 0;
+    unsigned section = ~0u, targetChoice = 0;
 };
 void selfTest();
 } // namespace survival
