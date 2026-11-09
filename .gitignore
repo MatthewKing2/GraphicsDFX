@@ -1,6 +1,10 @@
 *
 
 !.gitignore
+!docs/
+!docs/survival-game-mvp-plan.md
+!docs/survival-game.md
+!docs/survival-game-results.csv
 !glm/
 !glm/**
 !Libraries/
@@ -22,10 +26,24 @@
 !graphics/vulkan/src/profiling.hpp
 !graphics/vulkan/src/nbody.hpp
 !graphics/vulkan/src/nbody.cpp
+!graphics/vulkan/src/game_main.cpp
+!graphics/vulkan/src/game.cpp
+!graphics/vulkan/src/game.hpp
+!graphics/vulkan/src/game_input.cpp
+!graphics/vulkan/src/game_input.hpp
+!graphics/vulkan/src/prediction.cpp
+!graphics/vulkan/src/prediction.hpp
+!graphics/vulkan/src/gpu_prediction.cpp
+!graphics/vulkan/src/gpu_prediction.hpp
+!graphics/vulkan/src/compute_context.hpp
 !graphics/vulkan/benchmark-results.json
 !graphics/vulkan/shaders/
 !graphics/vulkan/shaders/bh_build.comp
 !graphics/vulkan/shaders/bh_force.comp
+!graphics/vulkan/shaders/scene.vert
+!graphics/vulkan/shaders/predict.comp
+!graphics/vulkan/shaders/prediction_kernel.inc
 !graphics/vulkan/tests/
 !graphics/vulkan/tests/nbody_test.cpp
 !graphics/vulkan/tests/benchmark.ps1
+!graphics/vulkan/tests/game-checks.ps1

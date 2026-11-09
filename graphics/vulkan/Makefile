@@ -22,9 +22,30 @@ LIBS = \
 -lshell32 \
 -lole32
 
-.PHONY: all shaders test
+.PHONY: all shaders test game game-test
 
 all: shaders $(OUT)
+
+GAME_SRC = src/game_main.cpp src/game.cpp src/game_input.cpp src/prediction.cpp src/gpu_prediction.cpp src/renderer.cpp src/nbody.cpp
+GAME_HEADERS = src/game.hpp src/game_input.hpp src/prediction.hpp src/gpu_prediction.hpp src/compute_context.hpp src/renderer.hpp shaders/prediction_kernel.inc
+
+game: build/scene.spv build/predict.spv build/frag.spv build/survival_game.exe
+
+build/scene.spv: shaders/scene.vert
+	$(GLSLC) $< -o $@
+
+build/predict.spv: shaders/predict.comp shaders/prediction_kernel.inc
+	$(GLSLC) $< -o $@
+
+build/survival_game.exe: $(GAME_SRC) $(GAME_HEADERS)
+	$(CXX) $(GAME_SRC) $(CXXFLAGS) $(INCLUDES) $(LIBS) -o $@
+
+build/survival_benchmark.exe: $(GAME_SRC) $(GAME_HEADERS)
+	$(CXX) $(GAME_SRC) $(CXXFLAGS) -DNDEBUG $(INCLUDES) $(LIBS) -o $@
+
+game-test: game
+	./build/survival_game.exe --self-test
+	./build/survival_game.exe --validate
 
 shaders: $(SHADERS)
 

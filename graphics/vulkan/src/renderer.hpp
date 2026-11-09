@@ -10,6 +10,8 @@
 #include <vector>
 
 class CameraController;
+class GameInput;
+struct ComputeContext;
 
 // CPU-side geometry. The application owns and fills this ordinary memory.
 struct Vertex {
@@ -63,6 +65,13 @@ struct FrameTransforms {
     alignas(16) glm::mat4 projection{1.0f};
 };
 
+// Game-owned objects, independent of the N-body simulation. tint.w < 0 means
+// a clip-space HUD rectangle; otherwise transform is an ordinary world matrix.
+struct alignas(16) SceneInstance {
+    glm::mat4 transform{1.0f};
+    glm::vec4 tint{1.0f};
+};
+
 class Renderer {
 public:
     // Uploads the shared mesh once. The selected backend owns particle updates;
@@ -76,6 +85,13 @@ public:
         const std::string& texturePath,
         const RendererOptions& options = {});
     ~Renderer();
+
+    Renderer(std::uint32_t width, std::uint32_t height, const char* title,
+        const Mesh& mesh, std::uint32_t instanceCapacity);
+    void drawScene(const FrameTransforms&, const std::vector<SceneInstance>&);
+    // Prediction uses this renderer's device/queue, on the same host thread.
+    // The predictor must be destroyed before the renderer.
+    ComputeContext computeContext() const;
 
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
@@ -98,6 +114,7 @@ public:
 
 private:
     friend class CameraController;
+    friend class GameInput;
 
     // Used by platform-facing helpers such as CameraController. GLFW remains
     // out of this public header and out of the application code.

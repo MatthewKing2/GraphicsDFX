@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "profiling.hpp"
 #include "nbody.hpp"
+#include "compute_context.hpp"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -137,23 +138,24 @@ public:
         const std::vector<Mesh>& meshes,
         const std::vector<gpu_particle>& initialParticles,
         const std::string& initialTexturePath,
-        const RendererOptions& rendererOptions)
+        const RendererOptions& rendererOptions,
+        uint32_t sceneCapacity = 0)
         : width(initialWidth),
         height(initialHeight),
         title(windowTitle),
         texturePath(initialTexturePath),
-        particleCount(0), options(rendererOptions) {
+        particleCount(0), options(rendererOptions), sceneMode(sceneCapacity != 0) {
 
-        if (meshes.size() != 1 || initialParticles.empty() ||
+        if (meshes.size() != 1 || (!sceneMode && initialParticles.empty()) ||
             initialParticles.size() > std::numeric_limits<uint32_t>::max()) {
             throw std::invalid_argument(
                 "provide one shared mesh and a nonempty particle array");
         }
-        particleCount = static_cast<uint32_t>(initialParticles.size());
+        particleCount = sceneMode ? sceneCapacity : static_cast<uint32_t>(initialParticles.size());
         if (particleCount > (1u << 23)) {
             throw std::invalid_argument("particle count exceeds this demo's tree/index limit");
         }
-        if (isCpu()) cpuSimulation = std::make_unique<CpuNBody>(initialParticles, isBarnesHut());
+        if (isCpu() && !sceneMode) cpuSimulation = std::make_unique<CpuNBody>(initialParticles, isBarnesHut());
         for (const auto& particle : initialParticles) {
             for (int component = 0; component < 4; ++component) {
                 if (!std::isfinite(particle.positionMass[component]) ||
@@ -200,6 +202,17 @@ public:
 
     float aspectRatio() const {
         return swapChainExtent.width / static_cast<float>(swapChainExtent.height);
+    }
+
+    ComputeContext computeContext() {
+        return {physicalDevice, device, graphicsQueue, findQueueFamilies(physicalDevice).graphicsFamily.value()};
+    }
+
+    void drawScene(const FrameTransforms& transforms, const std::vector<SceneInstance>& objects) {
+        if (!sceneMode || objects.size() > particleCount) throw std::runtime_error("scene capacity exceeded");
+        sceneObjects = &objects;
+        drawFrameInternal(transforms, SimulationParameters{});
+        sceneObjects = nullptr;
     }
 
     void drawFrame(
@@ -343,9 +356,11 @@ private:
     uint32_t particleCount;
     RendererOptions options;
     std::unique_ptr<CpuNBody> cpuSimulation;
+    bool sceneMode = false;
+    const std::vector<SceneInstance>* sceneObjects = nullptr;
     uint32_t lastSubmittedFrame = std::numeric_limits<uint32_t>::max();
     bool isCpu() const {
-        return options.mode == SimulationMode::CpuAllPairs || options.mode == SimulationMode::CpuBarnesHut;
+        return sceneMode || options.mode == SimulationMode::CpuAllPairs || options.mode == SimulationMode::CpuBarnesHut;
     }
     bool isBarnesHut() const {
         return options.mode == SimulationMode::CpuBarnesHut || options.mode == SimulationMode::GpuBarnesHut;
@@ -898,7 +913,7 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile("build/vert.spv");
+        auto vertShaderCode = readFile(sceneMode ? "build/scene.spv" : "build/vert.spv");
         auto fragShaderCode = readFile("build/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
@@ -1092,13 +1107,14 @@ private:
     }
 
     void createTextureImage() {
-        int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load(texturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-        VkDeviceSize imageSize = texWidth * texHeight * 4;
+        int texWidth = 1, texHeight = 1, texChannels = 4;
+        stbi_uc white[] = {255, 255, 255, 255};
+        stbi_uc* pixels = sceneMode ? white : stbi_load(texturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 
         if (!pixels) {
             throw std::runtime_error("failed to load texture image!");
         }
+        VkDeviceSize imageSize = VkDeviceSize(texWidth) * texHeight * 4;
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
@@ -1109,7 +1125,7 @@ private:
             memcpy(data, pixels, static_cast<size_t>(imageSize));
         vkUnmapMemory(device, stagingBufferMemory);
 
-        stbi_image_free(pixels);
+        if (!sceneMode) stbi_image_free(pixels);
 
         createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
 
@@ -1296,7 +1312,7 @@ private:
 
     void createUniformBuffers() {
         const VkDeviceSize modelBytes =
-            VkDeviceSize(particleCount) * sizeof(glm::mat4);
+            VkDeviceSize(particleCount) * (sceneMode ? sizeof(SceneInstance) : sizeof(glm::mat4));
 
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(physicalDevice, &properties);
@@ -1620,7 +1636,7 @@ private:
             VkDescriptorBufferInfo models{};
             models.buffer = frame.modelsBuffer;
             models.offset = 0;
-            models.range = VkDeviceSize(particleCount) * sizeof(glm::mat4);
+            models.range = VkDeviceSize(particleCount) * (sceneMode ? sizeof(SceneInstance) : sizeof(glm::mat4));
             std::array<VkWriteDescriptorSet, 3> writes{};
 
             VkDescriptorImageInfo image{};
@@ -1832,7 +1848,7 @@ private:
                 commandBuffer,
                 mesh.vertexBuffer,
                 mesh.indexBuffer,
-                particleCount,
+                sceneMode ? static_cast<uint32_t>(sceneObjects->size()) : particleCount,
                 mesh.indexCount);
         }
 
@@ -1955,7 +1971,9 @@ private:
         profiling::ScopedTimer timer(profiling::Stage::MatrixCopy);
         auto& frame = frames[frameIndex];
         memcpy(frame.mapped, &transforms, sizeof(transforms));
-        if (isCpu()) {
+        if (sceneMode) {
+            if (!sceneObjects->empty()) memcpy(frame.modelsMapped, sceneObjects->data(), sceneObjects->size() * sizeof(SceneInstance));
+        } else if (isCpu()) {
             memcpy(frame.modelsMapped, cpuSimulation->models().data(), size_t(particleCount) * sizeof(glm::mat4));
         }
     }
@@ -1999,7 +2017,7 @@ private:
         }
 
         // The fence guarantees this frame slot is no longer being read by the GPU.
-        if (isCpu()) {
+        if (isCpu() && !sceneMode) {
             const auto cpu = cpuSimulation->step(simulation, measure);
             timing.cpuBuildMs = cpu.buildMs;
             timing.cpuForceMs = cpu.forceMs;
@@ -2308,6 +2326,17 @@ Renderer::Renderer(
 }
 
 Renderer::~Renderer() = default;
+
+Renderer::Renderer(uint32_t width, uint32_t height, const char* title,
+    const Mesh& mesh, uint32_t capacity)
+    : impl(std::make_unique<Impl>(width, height, title, std::vector<Mesh>{mesh},
+        std::vector<gpu_particle>{}, "", RendererOptions{}, capacity)) {}
+
+void Renderer::drawScene(const FrameTransforms& transforms, const std::vector<SceneInstance>& objects) {
+    impl->drawScene(transforms, objects);
+}
+
+ComputeContext Renderer::computeContext() const { return impl->computeContext(); }
 
 bool Renderer::shouldClose() const {
     return impl->shouldClose();
