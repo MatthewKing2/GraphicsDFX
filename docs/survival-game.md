@@ -20,10 +20,20 @@ Or from `graphics/vulkan`: `make game`, then `.\build\survival_game.exe`.
 - Escape: pause and release mouse; Escape resumes. Close the window to quit.
 - F1: CPU/GPU prediction; F2: signs/prediction off/on; F3: console/window statistics.
 
-Forks arrive every **2.4 seconds**. Speed starts at 18 units/second, then rises by
-1.2 units/second every second without a forward-speed cap. The first fork has two
-openings; later forks randomly have 2-4. Enter a tunnel, avoid its hazards, merge
-back into the shaft, then choose again. Collision kills immediately.
+Sections now last **12 seconds** (five times the previous duration). Tunnel mouths
+are 7 units across, versus 3.7 before, and each tunnel contains **ten hazards**
+instead of two. There are three seconds to enter a mouth and a short exit into the
+common shaft. Speed starts at 18 units/second, then rises by 1.2 every second
+without a forward-speed cap. The first fork has two openings; later forks have 2-4.
+Collision kills immediately. Position, mouse target and lateral velocity are
+preserved at exits: no automatic drift, snap, or recentering.
+
+The first sections have small blocks, slow blades, and wide crusher gaps. Over
+the first twelve sections, obstacles grow, gaps narrow and motion speeds up.
+Impossible openings start only after the opening three sections. Forks remain
+12 seconds apart; increased speed alone does not shorten that interval. This is
+an authored difficulty ramp alongside acceleration, not a physical consequence
+of fixed-length tunnels. Physical section lengths grow with forward speed.
 
 No gameplay HUD, crosshair, or fixed probability panels. Percentages float in world
 space above the upcoming openings. Green outlines mark the preferred estimate;
@@ -42,7 +52,8 @@ collision, not manually forced to zero. There are no checkpoints or finish line;
 survival time is the score.
 
 Normal launches choose a fresh course seed; retries repeat it for practice.
-The 32-section layout loops after 76.8 seconds while forward speed keeps rising.
+The 32-section layout (including its difficulty ramp) loops after 384 seconds
+while forward speed keeps rising.
 This is intentionally not unlimited unique procedural content.
 
 Useful options from `graphics/vulkan`:
@@ -68,9 +79,9 @@ steering controller survive through this tunnel's exit?"
 
 All choices use the **same section exit**. This versioned model replaces the old
 eight-second jump-failure model. When signs are shown from the previous tunnel,
-prediction is conditional on reaching the next fork: the merge offset/velocity is
-projected forward. It does not promise survival through the currently selected
-tunnel as well.
+prediction is conditional on reaching the next fork at the current world-space
+lateral position/velocity. It does not predict your intervening inputs or promise
+survival through the currently selected tunnel as well.
 
 Each rollout stores lateral position/velocity, reaction countdown, obstacle index,
 PRNG state, and alive/dead state. At 60 Hz it:
@@ -96,6 +107,14 @@ Three-point recommendation hysteresis limits flicker. Results expire and are
 checked against run, section, course version and simulation age. Only one request
 is pending; the render loop never waits for prediction readback.
 
+Percentages are live, not intrinsic tunnel ratings. Position, velocity, time left
+to enter, and arrival phase change the answer as you approach. The per-section RNG
+seed is stable; this is not simply replacing samples with fresh random seeds.
+At 512 independent trials, worst-case standard error is about 2.2 percentage
+points (roughly +/-4.3 points for a 95% normal-approximation interval). That is
+sampling error *under this controller model*, not a human-survival guarantee.
+Better sampling cannot fix an inaccurate player model.
+
 ## What the FPGA would actually compute
 
 It would execute the **whole rollout-and-aggregation engine**, not render meshes,
@@ -110,7 +129,7 @@ run floating-point rigid-body physics, or stream random numbers back to the host
 
 Periods are powers of two. Rotation uses 32 fixed-point directions, shared with
 rendering; reversals reflect phase. No floating-point trigonometry is needed in
-the predictor. Useful prospective widths include 14 signed bits for shaft position,
+the predictor. Useful prospective widths include 15 signed bits for shaft position,
 9 for velocity, 7-9 for motion phase, and 32 for PRNG. Begin with a few reusable
 engines and local tables, not thousands of fully unrolled simulations. Actual
 resource usage and clock rate require synthesis and timing closure.
@@ -132,7 +151,8 @@ No RTL, driver, FPGA resource/timing result, or measured FPGA power is included.
 
 ## Memory, PCIe and the success criterion
 
-- Course: **10,240 bytes**, uploaded once and resident (32 sections x four slots).
+- Course: **43,008 bytes**, uploaded once and resident (32 sections x four slots,
+  ten 32-byte obstacles plus a 16-byte header per route; course version 3).
 - Request: **48 bytes**, including IDs, section, incoming state, clock and seed.
 - Result payload: **64 bytes**, four summaries; unused choice slots stay zero.
 
@@ -151,6 +171,103 @@ not replace comparison to a Jetson without the extra board cost. A cheap CPU/GPU
 job may save less energy than an always-on FPGA/link consumes. Laptop timing
 cannot establish hardware success.
 
+## Prediction design: what we can defend (proposals, NOT implemented)
+
+The current predictor estimates a probability over trajectories, not whether an
+optimal path exists. A planner answering "there is a safe route" is not answering
+"how often does this imperfect controller survive?" That distinction motivates
+probabilistic analysis, **not Monte Carlo specifically**. Our current hazards are
+deterministic and lateral motion is one-dimensional. Reachability grids,
+probability propagation/dynamic programming, precomputed phase tables, and small
+quadrature schemes are credible competitors. Even the guaranteed center-line and
+sealed routes have cheap special cases. They must be allowed in a fair baseline.
+
+Statistical model checking samples trajectories without constructing an entire
+state-transition model; it is useful when that model is too large to construct.
+Numerical probabilistic methods are alternatives, not invalid shortcuts. See the
+[PRISM sampling explanation](https://www.prismmodelchecker.org/manual/RunningPRISM/StatisticalModelChecking)
+and [numerical solution methods](https://www.prismmodelchecker.org/manual/ConfiguringPRISM/SolutionMethodsAndOptions).
+
+Three potential tunnel configurations, in order of preference:
+
+1. **Gusty shaft with correlated uncertainty.** Visible fans create gusts; player
+   inertia and several gust/filter modes persist through many gates. Sample a
+   few uncertain parameters once per rollout, then evolve correlated gust state
+   and reaction errors. Passing gate A changes the state arriving at gate B.
+   Multiplying independent per-gate survival rates is wrong, and a nominal path
+   misses the distribution. A sufficiently fine DP grid must include velocity,
+   gust/filter state, latent parameters and controller state, not just position.
+   Test DP and sparse/quasi-Monte-Carlo integration anyway: a low-dimensional
+   version may still be cheap. Fans and gates can use bounded integer recurrences,
+   so a small FPGA pipeline could retain local state and share collision units.
+
+2. **Reactive, history-dependent gates.** Passing left/right sensors changes
+   later doors, reverses blades or changes fan modes; switches have delayed
+   effects and visible warnings. Add a bounded steering/heat budget so choices
+   affect future maneuverability. Under the same imperfect-player model, gate
+   state depends on the whole realized trajectory. A fixed obstacle timetable or
+   single shortest path cannot give the survival probability. Exact analysis can
+   augment its state with latch bits, delay queues, heat and movement, but their
+   joint state space grows. Local bits/counters/compares fit the FPGA hypothesis
+   better than heavy floating-point physics. Still benchmark event-driven DP or
+   compressed decision diagrams; a few independent switches are not sufficient
+   evidence of a difficult problem.
+
+3. **Small interacting hazard swarms.** A few telegraphed drones/shards bounce,
+   redirect each other or trigger shutters, with uncertain initial states and
+   correlated steering modes. Predict joint player-plus-hazard trajectories.
+   Summing obstacle risks ignores correlations; a full joint-state probability
+   grid becomes expensive as moving-body state grows. Use a bounded body count
+   and simple fixed-point interactions so an FPGA engine remains feasible.
+   More entities also increase FPGA storage/multiplier cost, and a GPU may handle
+   these batches very well. This is the highest implementation and fairness risk;
+   compare simplified analytic bounds and low-order probability models first.
+
+My recommendation is **(1), then a small amount of (2)**. These provide meaningful
+uncertainty, temporal correlation and history without requiring a physics engine
+that may overwhelm LiteFury. Randomness must be reflected in the real game's
+rules or honestly represent calibrated player uncertainty, not exist only to
+make a benchmark expensive. Telegraph changes; avoid unavoidable random deaths.
+
+### Energy argument and its limits
+
+Small fixed-point state, shifts, comparisons, local RNG and early termination
+are a plausible match for a custom rollout engine. CPU instruction/control
+overhead and GPU divergent execution may cost energy; NVIDIA documents the
+[divergence issue](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/#branching-and-divergence).
+That is an architecture hypothesis, not a measurement: compiler predication,
+vectorization, grouping, event skipping and shared-pose caching can improve the
+CPU/GPU too. The current CPU is a scalar worker, not a tuned Jetson baseline.
+
+LiteFury's vendor specifies an Artix-7 XC7A100T and PCIe Gen2 x4; the Orin Nano
+developer kit exposes a Key-M 2280 PCIe x4 slot. That is a starting point, not
+proof of driver, power, cooling or bitstream compatibility. Sources:
+[LiteFury vendor](https://github.com/RHSResearchLLC/NiteFury-and-LiteFury),
+[Jetson carrier layout](https://docs.nvidia.com/jetson/orin-nano-devkit/user-guide/latest/hardware_layout.html).
+The vendor's 10 W supply rating is NOT a measured LiteFury operating-power claim.
+Keep course/state resident and return only aggregates; tiny payload bandwidth
+does not make PCIe PHY/link/board idle power free.
+
+Longer tunnels allow earlier, less frequent, batched predictions. That benefits
+**every** backend: a CPU can also finish and sleep. The code still refreshes at
+10 Hz; a slower/stable preview policy is a separate future change. Compare equal
+quality and deadlines, not an always-running host against a sleeping FPGA.
+
+There is no honest proof that a tunnel forces Monte Carlo or guarantees a large
+energy win. A defensible claim is: **for a stated model, error target, confidence
+and deadline, this implementation uses less whole-system energy than the best
+reasonable alternatives tested**. Fix the controller, use held-out courses and
+high-accuracy reference results, and compare rollout sampling against reachable
+sets (feasibility only), probability-grid DP, cheaper integration and lookup/
+surrogate models. Measure probability calibration/error AND route-choice regret,
+not merely CPU/GPU bit agreement. If a cheaper method meets the quality target,
+it wins. For example, choose a provisional +/-3 percentage-point error budget
+and a 0.5-second deadline before tuning sample counts; do not manufacture either
+requirement after seeing benchmark results. Measure total joules per decision
+and total game power at fixed FPS, including PCIe, driver and board idle costs.
+If rendering dominates power, even a large predictor-only improvement may yield
+only a small whole-game reduction.
+
 ## Code and tests
 
 - `game.cpp`: motion, tunnel geometry, collisions, world signs and menus.
@@ -166,7 +283,8 @@ From the repository root:
 .\graphics\vulkan\tests\game-checks.ps1 -Benchmark -NBody
 ```
 
-Checks cover 20 consecutive viable forks, acceleration/no braking, 2/3/4 choices,
+Checks cover 20 consecutive viable forks, per-tick lateral continuity including
+entrances/exits, acceleration/no braking, 2/3/4 choices,
 all obstacle kinds, impossible routes, deterministic streams, stale results, and
 48 exact CPU/GPU comparisons including partial workgroups and course wrapping.
 Rendered tests verify live guidance. Screenshots: `build/game-fork.bmp`,
@@ -183,10 +301,27 @@ Intentional rough edges: no audio, repeated 32-section course, flat geometry and
 a coarse, uncalibrated steering model. Next: playtest steering, decision timing,
 and obstacle readability rather than build a bigger engine.
 
-## Laptop snapshot (2026-11-09)
+## Long-tunnel check (2026-11-09, course version 3)
+
+Both rendered backends passed 20 twelve-second sections with live predictions,
+about 17.1 ms/frame under the 60 FPS cap. The lateral-continuity regression,
+48 exact CPU/GPU request comparisons, Vulkan synchronization validation and the
+original N-body regression tests passed. Screenshots were inspected for the
+wider mouths and four-way signs. This is automated testing, not human playtesting.
+
+On the same i7-12700H / RTX 3050 Ti laptop, optimized prediction-only requests at
+512 rollouts per opening measured 13.118 ms CPU / 4.433 ms GPU for two openings,
+and 22.802-24.223 ms CPU / 4.469-4.735 ms GPU for four openings. GPU kernel time
+was about 4.1 ms. Six measured samples per case followed two warmups; all integer
+aggregates matched. Raw data: [tunnel-long-results.csv](tunnel-long-results.csv).
+These are laptop latency figures, **not Jetson or FPGA energy measurements**.
+The scalar CPU and current GPU implementation are not final optimized baselines.
+
+## Historical short-tunnel snapshot (2026-11-09, course version 2)
 
 Intel i7-12700H / Vulkan-selected RTX 3050 Ti Laptop GPU. Optimized prediction-only
-requests, seed 12345; six measured samples after two warmups. Raw data:
+requests, seed 12345; six measured samples after two warmups. These figures are
+for the OLD 2.4-second/two-obstacle tunnels, not the longer version above. Raw data:
 [tunnel-game-results.csv](tunnel-game-results.csv). Not Jetson or energy results.
 
 | Section / openings | Rollouts per opening | CPU request latency | GPU request latency | GPU kernel |

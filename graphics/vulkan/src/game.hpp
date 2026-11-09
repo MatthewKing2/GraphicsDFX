@@ -4,7 +4,8 @@
 #include "renderer.hpp"
 #include <string>
 namespace survival {
-constexpr float SECTION_SECONDS = 2.4f, INITIAL_SPEED = 18.0f, FORWARD_ACCELERATION = 1.2f;
+constexpr float SECTION_SECONDS = float(prediction::SECTION_TICKS) / prediction::TICKS_PER_SECOND,
+                INITIAL_SPEED = 18.0f, FORWARD_ACCELERATION = 1.2f;
 struct State {
     glm::vec3 feet{0, 0, 0};
     float localX = 0, lateralSpeed = 0, mouseTarget = 0;
@@ -22,7 +23,7 @@ struct Guidance {
     uint32_t rollouts = 512, horizon = prediction::HORIZON;
 };
 float distanceAt(float seconds);
-float routeCenter(const prediction::Course &, unsigned stage, unsigned choice, float phase);
+float routeCenter(const prediction::Course &, unsigned stage, unsigned choice);
 Mesh cubeMesh();
 class Game {
   public:

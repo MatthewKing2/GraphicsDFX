@@ -1,15 +1,21 @@
 #pragma once
+#include "../shaders/tunnel_config.inc"
 #include <array>
 #include <cstddef>
 #include <cstdint>
 
 namespace prediction {
 using uint = std::uint32_t;
-constexpr uint STAGES = 32, CHOICES = 4, COURSE_VERSION = 2;
-constexpr uint TICKS_PER_SECOND = 60, SECTION_TICKS = 144, ENTRY_TICK = 52;
-constexpr uint HAZARD_TICKS[2] = {84, 116};
-constexpr uint HORIZON = 144, MAX_HORIZON = 144, MAX_ROLLOUTS = 16384;
-constexpr int PLAYER_RADIUS = 180, TUNNEL_LIMIT = 1650, MAX_VELOCITY = 200, ACCELERATION = 22;
+constexpr uint STAGES = 32, CHOICES = 4, COURSE_VERSION = 3;
+constexpr uint TICKS_PER_SECOND = 60, SECTION_TICKS = TUNNEL_SECTION_TICKS,
+               ENTRY_TICK = TUNNEL_ENTRY_TICK, MERGE_TICK = TUNNEL_MERGE_TICK,
+               OBSTACLES = TUNNEL_OBSTACLES;
+constexpr uint HORIZON = SECTION_TICKS, MAX_HORIZON = HORIZON, MAX_ROLLOUTS = 16384;
+constexpr int PLAYER_RADIUS = 180, TUNNEL_LIMIT = TUNNEL_LOCAL_LIMIT,
+              SHAFT_LIMIT = TUNNEL_SHAFT_LIMIT, MAX_VELOCITY = 200, ACCELERATION = 22;
+constexpr uint hazardTick(uint event) {
+    return TUNNEL_FIRST_HAZARD + event * TUNNEL_HAZARD_SPACING;
+}
 
 // Each obstacle is an extruded cross-section at a known arrival tick.
 // kind: 0 triangular spike, 1 slider, 2 rotating bar, 3 contracting aperture.
@@ -20,7 +26,7 @@ struct alignas(16) Obstacle {
 };
 struct alignas(16) Route {
     uint choiceCount, seed, reactionTicks, lateralNoise;
-    std::array<Obstacle, 2> obstacles;
+    std::array<Obstacle, OBSTACLES> obstacles;
 };
 struct Course {
     std::array<Route, STAGES * CHOICES> routes;
@@ -42,7 +48,7 @@ struct Result {
 struct Pose {
     int center, cosine, sine, aperture;
 };
-static_assert(sizeof(Obstacle) == 32 && sizeof(Route) == 80 && sizeof(Course) == 10240,
+static_assert(sizeof(Obstacle) == 32 && sizeof(Route) == 336 && sizeof(Course) == 43008,
               "course layout");
 static_assert(sizeof(Request) == 48 && offsetof(Request, xMm) == 16, "request layout");
 static_assert(sizeof(Summary) == 16, "summary layout");

@@ -1,10 +1,11 @@
 // Shared Q10 motion/collision primitives. Coordinates are millimetres.
+#include "tunnel_config.inc"
 uint randomNext(uint state) {state^=state<<13;state^=state>>17;state^=state<<5;return state;}
 uint mixSeed(uint value) {
     value^=value>>16;value*=0x7feb352du;value^=value>>15;
     value*=0x846ca68bu;value^=value>>16;return value|1u;
 }
-int laneCenter(uint count,uint choice) {return (int(choice)*2-int(count)+1)*2000;}
+int laneCenter(uint count,uint choice) {return (int(choice)*2-int(count)+1)*TUNNEL_HALF_PITCH;}
 int sineQ10(uint phase) {
     uint index=((phase+2u)>>2u)&31u;
     bool negative=index>16u;
@@ -49,7 +50,7 @@ bool blocked(Obstacle obstacle,int x,uint tick) {
 int steeringTarget(Route route,int x,uint tick,uint eventTick,uint event) {
     int best=0,bestCost=2147483647;
     for(int candidateIndex=-4;candidateIndex<=4;++candidateIndex) {
-        int candidate=candidateIndex*350;
+        int candidate=candidateIndex*700;
         if(!blocked(route.obstacles[event],candidate,eventTick) &&
            !blocked(route.obstacles[event],candidate,eventTick-3u) &&
            !blocked(route.obstacles[event],candidate,eventTick+3u)) {

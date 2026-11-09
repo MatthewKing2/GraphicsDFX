@@ -132,7 +132,7 @@ void validateGpu(GpuPrediction &gpu, const prediction::Course &course) {
             r.rollouts = count;
             r.junction = stage;
             r.routeCount = prediction::choices(course, stage);
-            r.worldTick = stage * 144 + (cases % 3) * 10;
+            r.worldTick = stage * prediction::SECTION_TICKS + (cases % 3) * 10;
             r.seed = 12345 + stage;
             r.xMm = cases % 2 ? 900 : -1200;
             r.velocity = cases % 2 ? -20 : 15;
@@ -165,7 +165,7 @@ void benchmark(GpuPrediction &gpu, const prediction::Course &course, const std::
             prediction::Request r;
             r.rollouts = count;
             r.junction = stage;
-            r.worldTick = stage * 144;
+            r.worldTick = stage * prediction::SECTION_TICKS;
             r.routeCount = prediction::choices(course, stage);
             auto reference = prediction::evaluate(course, r);
             for (unsigned backend = 0; backend < 2; ++backend) {
@@ -339,11 +339,12 @@ int main(int argc, char **argv) {
             if (!guidance.paused) {
                 if (!autoplay && !smoke)
                     game.look(controls.mouseX, controls.mouseY);
-                accumulator += smoke ? 8.0 / 120 : dt;
+                accumulator += smoke ? 20.0 / 120 : dt;
                 jumpEdge |= controls.jump;
                 restartEdge |= controls.restart;
                 int catchup = 0;
-                while (accumulator >= 1.0 / 120 && catchup++ < 12) {
+                const int maxCatchup = smoke ? 24 : 12;
+                while (accumulator >= 1.0 / 120 && catchup++ < maxCatchup) {
                     auto step = autoplay || smoke ? bot.sample(game) : controls;
                     if (!autoplay && !smoke) {
                         step.jump = jumpEdge;
@@ -355,7 +356,7 @@ int main(int argc, char **argv) {
                     if (smoke && game.state().dead)
                         throw std::runtime_error("smoke died: " + game.state().deathReason);
                 }
-                if (catchup >= 12)
+                if (catchup >= maxCatchup)
                     accumulator = 0;
             } else
                 accumulator = 0;
@@ -441,7 +442,7 @@ int main(int argc, char **argv) {
             }
             if (frameLimit && frameNumber >= frameLimit)
                 break;
-            if (smoke && frameNumber > 1200)
+            if (smoke && frameNumber > 2000)
                 throw std::runtime_error("dive smoke did not reach 20 forks");
         }
         return 0;

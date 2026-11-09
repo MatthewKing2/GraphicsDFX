@@ -6,6 +6,7 @@
 !docs/survival-game.md
 !docs/survival-game-results.csv
 !docs/tunnel-game-results.csv
+!docs/tunnel-long-results.csv
 !glm/
 !glm/**
 !Libraries/
@@ -46,6 +47,7 @@
 !graphics/vulkan/shaders/predict.comp
 !graphics/vulkan/shaders/prediction_kernel.inc
 !graphics/vulkan/shaders/tunnel_math.inc
+!graphics/vulkan/shaders/tunnel_config.inc
 !graphics/vulkan/tests/
 !graphics/vulkan/tests/nbody_test.cpp
 !graphics/vulkan/tests/benchmark.ps1

@@ -12,6 +12,9 @@ namespace survival {
 namespace {
 const glm::vec3 cyan(.08f, .75f, .85f), violet(.5f, .12f, .8f), red(.95f, .025f, .065f),
     white(.8f, .9f, 1);
+constexpr float tunnelRadius = 3.5f, shaftRadius = 16.0f;
+const float tunnelApothem = tunnelRadius * std::cos(glm::radians(22.5f)),
+            shaftApothem = shaftRadius * std::cos(glm::radians(22.5f));
 void object(std::vector<SceneInstance> &scene, glm::vec3 center, glm::vec3 size, glm::vec3 color,
             float primitive = 1) {
     SceneInstance item;
@@ -204,15 +207,16 @@ Mesh cubeMesh() {
 float distanceAt(float seconds) {
     return INITIAL_SPEED * seconds + .5f * FORWARD_ACCELERATION * seconds * seconds;
 }
-float routeCenter(const prediction::Course &course, unsigned stage, unsigned choice, float phase) {
-    float t = std::clamp((phase - .82f) / .18f, 0.0f, 1.0f);
-    t = t * t * (3 - 2 * t);
-    return prediction::laneCenter(prediction::choices(course, stage), choice) * .001f * (1 - t);
+float routeCenter(const prediction::Course &course, unsigned stage, unsigned choice) {
+    return prediction::laneCenter(prediction::choices(course, stage), choice) * .001f;
 }
 Game::Game(const prediction::Course &course) : data(course) {}
 void Game::look(float dx, float) {
     // Relative mouse movement steers the player, not a freely flying camera.
-    player.mouseTarget = std::clamp(player.mouseTarget + dx * .014f, -7.7f, 7.7f);
+    float center =
+        player.branch < 0 ? 0.0f : routeCenter(data, player.stage, unsigned(player.branch));
+    player.mouseTarget =
+        std::clamp(player.mouseTarget + dx * .014f, -15.7f - center, 15.7f - center);
 }
 void Game::restart(bool) {
     unsigned generation = player.run + 1;
@@ -254,6 +258,7 @@ void Game::step(const GameControls &input, float dt) {
     player.feet.y = distanceAt(player.elapsed);
     const float phase = (player.elapsed - sectionStart) / SECTION_SECONDS;
     const float entry = float(prediction::ENTRY_TICK) / prediction::SECTION_TICKS;
+    const float merge = float(prediction::MERGE_TICK) / prediction::SECTION_TICKS;
     if (player.branch < 0 && phase >= entry) {
         auto count = prediction::choices(data, player.stage);
         int closest = 0;
@@ -275,13 +280,13 @@ void Game::step(const GameControls &input, float dt) {
         }
     }
     if (player.branch >= 0) {
-        if (std::abs(player.localX) > prediction::TUNNEL_LIMIT * .001f) {
+        if (phase < merge && std::abs(player.localX) > prediction::TUNNEL_LIMIT * .001f) {
             die("TUNNEL WALL");
             return;
         }
         const auto &route = prediction::route(data, player.stage, unsigned(player.branch));
-        for (unsigned event = 0; event < 2; ++event) {
-            float eventPhase = float(prediction::HAZARD_TICKS[event]) / prediction::SECTION_TICKS;
+        for (unsigned event = 0; event < prediction::OBSTACLES; ++event) {
+            float eventPhase = float(prediction::hazardTick(event)) / prediction::SECTION_TICKS;
             // Test the whole visible hazard depth, not just its central plane.
             const float halfWindow = 3.0f / prediction::SECTION_TICKS;
             if (previousPhase <= eventPhase + halfWindow && phase >= eventPhase - halfWindow) {
@@ -295,21 +300,20 @@ void Game::step(const GameControls &input, float dt) {
                 }
             }
         }
-        player.feet.x =
-            routeCenter(data, player.stage, unsigned(player.branch), phase) + player.localX;
+        player.feet.x = routeCenter(data, player.stage, unsigned(player.branch)) + player.localX;
     } else {
         player.feet.x = player.localX;
-        if (std::abs(player.localX) > 7.8f) {
-            die("OUTER SHAFT WALL");
-            return;
-        }
+    }
+    if (std::abs(player.feet.x) > prediction::SHAFT_LIMIT * .001f) {
+        die("OUTER SHAFT WALL");
+        return;
     }
     if (phase >= 1) {
+        // Change coordinate systems only: preserve world position, target and velocity.
+        player.mouseTarget += routeCenter(data, player.stage, unsigned(player.branch));
+        player.localX = player.feet.x;
         ++player.stage;
         player.branch = -1;
-        player.feet.x = player.localX;
-        // Cursor target remains local at each merge, avoiding automatic cross-shaft jumps.
-        player.mouseTarget = std::clamp(player.mouseTarget, -7.7f, 7.7f);
     }
 }
 uint32_t Game::decision() const {
@@ -323,7 +327,9 @@ prediction::Request Game::request(uint32_t id, uint32_t rollouts) const {
     r.id = id;
     r.run = player.run;
     r.junction = decision();
-    r.xMm = int(std::round(player.localX * 1000));
+    // A next-fork preview assumes we arrive there at our current world-space x.
+    // It is conditional on surviving the current tunnel, not a forecast of our input.
+    r.xMm = int(std::round(player.feet.x * 1000));
     r.velocity = std::clamp(int(std::round(player.lateralSpeed * 1000 / 60)), -200, 200);
     r.worldTick = unsigned(player.worldTime * 60);
     r.rollouts = rollouts;
@@ -357,25 +363,24 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
         float start = stage * SECTION_SECONDS;
         float entry = float(prediction::ENTRY_TICK) / prediction::TICKS_PER_SECOND;
         float y0 = distanceAt(start) - origin, yEntry = distanceAt(start + entry) - origin;
-        float yMerge = distanceAt(start + SECTION_SECONDS * .82f) - origin,
+        float yMerge = distanceAt(start + float(prediction::MERGE_TICK) / 60) - origin,
               yEnd = distanceAt(start + SECTION_SECONDS) - origin;
         auto count = prediction::choices(data, stage);
-        // Apothem -> 8.0 m circumradius, matching the common-shaft collision limit.
-        tube(scene, 0, 0, y0, yEntry, 7.4f, {.027f, .03f, .055f});
-        tube(scene, 0, 0, yMerge, yEnd, 7.4f, {.025f, .028f, .047f});
-        ring(scene, 0, y0, 7.4f, .09f, {.04f, .09f, .18f});
+        tube(scene, 0, 0, y0, yEntry, shaftApothem, {.027f, .03f, .055f});
+        tube(scene, 0, 0, yMerge, yEnd, shaftApothem, {.025f, .028f, .047f});
+        ring(scene, 0, y0, shaftApothem, .09f, {.04f, .09f, .18f});
         // A dark bulkhead with 2..4 octagonal mouths, not a HUD route selector.
-        object(scene, {0, yEntry, 5.0f}, {16, .45f, 6.2f}, {.018f, .02f, .032f});
-        object(scene, {0, yEntry, -5.0f}, {16, .45f, 6.2f}, {.018f, .02f, .032f});
-        float outer = float(count - 1) * 2 + 1.85f;
+        object(scene, {0, yEntry, 10.0f}, {32, .45f, 12.8f}, {.018f, .02f, .032f});
+        object(scene, {0, yEntry, -10.0f}, {32, .45f, 12.8f}, {.018f, .02f, .032f});
+        float outer = float(count - 1) * TUNNEL_HALF_PITCH * .001f + tunnelRadius;
         for (int side : {-1, 1})
-            object(scene, {side * (outer + (8 - outer) * .5f), yEntry, 0},
-                   {std::max(.01f, 8 - outer), .45f, 3.8f}, {.018f, .02f, .032f});
+            object(scene, {side * (outer + (shaftRadius - outer) * .5f), yEntry, 0},
+                   {std::max(.01f, shaftRadius - outer), .45f, 7.2f}, {.018f, .02f, .032f});
         for (unsigned divider = 0; divider + 1 < count; ++divider) {
             float x = (prediction::laneCenter(count, divider) +
                        prediction::laneCenter(count, divider + 1)) *
                       .0005f;
-            object(scene, {x, yEntry, 0}, {.30f, .5f, 3.8f}, {.025f, .02f, .04f});
+            object(scene, {x, yEntry, 0}, {1.0f, .5f, 7.2f}, {.025f, .02f, .04f});
         }
         for (unsigned choice = 0; choice < count; ++choice) {
             float x = prediction::laneCenter(count, choice) * .001f;
@@ -388,19 +393,19 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                 if (guidance.recommended == int(choice))
                     rim = glm::vec3(.15f, .95f, .55f);
             }
-            // 1.71 m apothem -> 1.85 m circumradius; leave the player-radius margin.
-            tube(scene, x, x, yEntry, yMerge, 1.71f, {.022f, .026f, .046f});
-            ring(scene, x, yEntry - .25f, 1.71f, .12f, rim);
-            for (int band = 1; band < 5; ++band) {
-                float t = float(band) / 5;
-                ring(scene, x, yEntry + (yMerge - yEntry) * t, 1.71f, .055f, {.035f, .06f, .12f});
+            tube(scene, x, x, yEntry, yMerge, tunnelApothem, {.022f, .026f, .046f});
+            ring(scene, x, yEntry - .25f, tunnelApothem, .12f, rim);
+            for (int band = 1; band < 21; ++band) {
+                float t = float(band) / 21;
+                ring(scene, x, yEntry + (yMerge - yEntry) * t, tunnelApothem, .055f,
+                     {.035f, .06f, .12f});
             }
             const auto &route = prediction::route(data, stage, choice);
-            for (unsigned event = 0; event < 2; ++event) {
+            for (unsigned event = 0; event < prediction::OBSTACLES; ++event) {
                 const auto &o = route.obstacles[event];
                 const auto pose = prediction::pose(o, unsigned(player.worldTime * 60));
-                float y = distanceAt(start + float(prediction::HAZARD_TICKS[event]) / 60) - origin;
-                float eventTime = start + float(prediction::HAZARD_TICKS[event]) / 60;
+                float y = distanceAt(start + float(prediction::hazardTick(event)) / 60) - origin;
+                float eventTime = start + float(prediction::hazardTick(event)) / 60;
                 float depth = distanceAt(eventTime + .05f) - distanceAt(eventTime - .05f);
                 float cx = x + pose.center * .001f;
                 if (o.kind == 0) {
@@ -414,7 +419,7 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                     spike.tint = glm::vec4(red, 2);
                     scene.push_back(spike);
                 } else if (o.kind == 1)
-                    object(scene, {cx, y, 0}, {o.extent * .002f, depth, 3.7f}, {.95f, .2f, .055f});
+                    object(scene, {cx, y, 0}, {o.extent * .002f, depth, 7.0f}, {.95f, .2f, .055f});
                 else if (o.kind == 2) {
                     SceneInstance blade;
                     float c = pose.cosine / 1024.0f, s = pose.sine / 1024.0f;
@@ -430,11 +435,13 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                 } else {
                     float gap = pose.aperture * .001f;
                     for (int side : {-1, 1}) {
-                        float width = std::max(.01f, 1.85f - gap);
-                        object(scene, {cx + side * (gap + width * .5f), y, 0}, {width, depth, 3.7f},
+                        // Extend each moving edge to its own wall, including center offset.
+                        float width =
+                            std::max(.01f, tunnelRadius - side * pose.center * .001f - gap);
+                        object(scene, {cx + side * (gap + width * .5f), y, 0}, {width, depth, 7.0f},
                                {.55f, .035f, .2f});
                         object(scene, {cx + side * gap, y - depth * .5f - .02f, 0},
-                               {.07f, .04f, 3.7f}, red, 3);
+                               {.07f, .04f, 7.0f}, red, 3);
                     }
                 }
             }
@@ -443,7 +450,7 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
                     guidance.valid
                         ? std::to_string(int(std::round(guidance.percentages[choice] * 100))) + "%"
                         : "...";
-                worldText(scene, {x, yEntry - .8f, 2.6f}, label, .105f,
+                worldText(scene, {x, yEntry - .8f, 4.3f}, label, .17f,
                           guidance.valid ? rim : glm::vec3(.15f, .25f, .4f));
             }
         }
@@ -454,7 +461,7 @@ void Game::scene(std::vector<SceneInstance> &scene, const Guidance &guidance) co
         float y = std::fmod(index * 13.7f - player.feet.y, 95.0f);
         if (y < 0)
             y += 95;
-        object(scene, {std::cos(angle) * 7.35f, y, std::sin(angle) * 7.35f},
+        object(scene, {std::cos(angle) * 14.7f, y, std::sin(angle) * 14.7f},
                {.025f, std::min(3.5f, player.speed * .07f), .025f}, {.045f, .14f, .2f}, 3);
     }
     // No gameplay HUD, score panel, crosshair or screen-space probabilities.
@@ -498,8 +505,8 @@ GameControls Autopilot::sample(const Game &game) {
         // game RNG. Prefer the guaranteed-clear center line for the test driver.
         for (unsigned c = 0; c < count; ++c) {
             const auto &route = prediction::route(game.course(), p.stage, c);
-            if (route.obstacles[0].kind == 0 && route.obstacles[0].offset == -1100 &&
-                route.obstacles[1].kind == 0 && route.obstacles[1].offset == 1100) {
+            if (route.obstacles[0].kind == 0 && route.obstacles[0].offset == -2400 &&
+                route.obstacles[1].kind == 0 && route.obstacles[1].offset == 2400) {
                 target = prediction::laneCenter(count, c);
                 break;
             }
@@ -530,13 +537,27 @@ void selfTest() {
             throw std::runtime_error("missing obstacle kind");
     Game game(course);
     Autopilot bot;
-    for (int tick = 0; tick < 120 * 80 && game.state().stage < 20; ++tick)
+    unsigned boundaries = 0;
+    for (int tick = 0; tick < 120 * 260 && game.state().stage < 20; ++tick) {
+        float previousX = game.state().feet.x;
+        unsigned previousStage = game.state().stage;
+        bool wasTitle = game.state().title;
         game.step(bot.sample(game), 1.0f / 120);
+        if (game.state().dead)
+            throw std::runtime_error("test driver died: " + game.state().deathReason);
+        if (!wasTitle && !game.state().dead &&
+            std::abs(game.state().feet.x - previousX - game.state().lateralSpeed / 120) > .0001f)
+            throw std::runtime_error("automatic lateral movement/recentering detected");
+        if (game.state().stage != previousStage)
+            ++boundaries;
+    }
     if (game.state().stage < 20 || game.state().dead || game.state().deaths)
         throw std::runtime_error("viable tunnel sequence cannot be steered");
     if (game.state().speed <= INITIAL_SPEED + 20)
         throw std::runtime_error("forward speed not increasing");
-    std::cout << "PASS forced-forward acceleration and 20 forks at 2.4 seconds each\n";
+    if (boundaries != 20)
+        throw std::runtime_error("missing section-boundary coverage");
+    std::cout << "PASS 20 twelve-second forks, acceleration and no automatic lateral movement\n";
     std::cout << "PASS seeded 2/3/4-way forks and all four obstacle kinds\n";
     Game noBrake(course);
     noBrake.restart();
@@ -546,12 +567,12 @@ void selfTest() {
         noBrake.step(backwards, 1.0f / 120);
     if (noBrake.state().feet.y < 8)
         throw std::runtime_error("backward input brakes falling");
-    for (int tick = 0; tick < 80; ++tick)
+    for (int tick = 0; tick < 360; ++tick)
         noBrake.step(backwards, 1.0f / 120);
     if (!noBrake.state().dead)
         throw std::runtime_error("missing a fork is not lethal");
     prediction::Obstacle sealed{3, 0, 7, 0, 0, 90, 0, 60};
-    for (int x = -1600; x <= 1600; x += 100)
+    for (int x = -prediction::TUNNEL_LIMIT; x <= prediction::TUNNEL_LIMIT; x += 100)
         for (unsigned tick = 0; tick < 128; tick += 8)
             if (!prediction::blocked(sealed, x, tick))
                 throw std::runtime_error("sealed path not lethal");
@@ -563,7 +584,7 @@ void selfTest() {
     int impossible = 0;
     for (unsigned stage = 0; stage < 16; ++stage) {
         r.junction = stage;
-        r.worldTick = stage * 144;
+        r.worldTick = stage * prediction::SECTION_TICKS;
         r.routeCount = prediction::choices(course, stage);
         auto result = prediction::evaluate(course, r);
         bool anyViable = false;

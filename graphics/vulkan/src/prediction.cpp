@@ -25,27 +25,35 @@ Course makeCourse(uint seed) {
             r.seed = rng;
             r.reactionTicks = 4u + (rng & 3u);
             r.lateralNoise = 70u + ((rng >> 8u) & 127u);
-            for (uint event = 0; event < 2; ++event) {
+            // Gentle opening sections; size and motion ramp with forward speed.
+            const int difficulty = int(std::min(stage, 12u));
+            for (uint event = 0; event < OBSTACLES; ++event) {
                 rng = randomNext(rng);
                 auto &o = r.obstacles[event];
                 o.kind = (stage + choice + event) % 4;
                 o.phase = rng & 255u;
-                o.period = 6u + ((rng >> 8u) % 3u);
+                o.period = stage < 4u ? 9u : stage < 10u ? 8u : 7u;
                 o.flags = (rng >> 12u) & 3u;
-                o.offset = int((rng >> 16u) % 1001u) - 500;
-                o.extent = o.kind == 0 ? 1700 : o.kind == 1 ? 400 : 1750;
-                o.amplitude = 1000;
-                o.opening = 650;
+                o.offset = int((rng >> 16u) % 1601u) - 800;
+                o.extent = o.kind == 0   ? 1000 + difficulty * 80
+                           : o.kind == 1 ? 200 + difficulty * 35
+                                         : 1600 + difficulty * 100;
+                o.amplitude = 600 + difficulty * 60;
+                // The crusher has a wide safe gap initially, then closes further.
+                if (o.kind == 3)
+                    o.extent = 3100;
+                o.opening = 2200 - difficulty * 100;
             }
             if (choice == safe) {
                 r.reactionTicks = 4;
                 r.lateralNoise = 80;
-                r.obstacles[0] = {0, 0, 7, 0, -1100, 1500, 0, 0};
-                r.obstacles[1] = {0, 0, 7, 1, 1100, 1500, 0, 0};
-            } else if (choice == sealed && (stage % 3u) != 0u) {
+                for (uint event = 0; event < OBSTACLES; ++event)
+                    r.obstacles[event] = {0,    0, 9, event & 1u, (event & 1u) ? 2400 : -2400,
+                                          1400, 0, 0};
+            } else if (choice == sealed && stage >= 3u && (stage % 3u) != 0u) {
                 // Genuinely impassable: even the widest aperture is smaller than
                 // the player. The probability is computed, not hard-coded to 0.
-                r.obstacles[1] = {3, 0, 7, 0, 0, 90, 0, 60};
+                r.obstacles[OBSTACLES - 1] = {3, 0, 7, 0, 0, 90, 0, 60};
             }
         }
     }
@@ -60,8 +68,8 @@ const Route &route(const Course &c, uint section, uint choice) {
 void validate(const Course &c, const Request &r) {
     if (r.courseVersion != COURSE_VERSION || r.rollouts == 0 || r.rollouts > MAX_ROLLOUTS ||
         r.horizon != HORIZON || r.routeCount != choices(c, r.junction) || r.routeCount < 2 ||
-        r.routeCount > 4 || r.junction > 60000 || r.worldTick > 10000000 || r.xMm < -8000 ||
-        r.xMm > 8000 || r.velocity < -MAX_VELOCITY || r.velocity > MAX_VELOCITY ||
+        r.routeCount > 4 || r.junction > 60000 || r.worldTick > 50000000 || r.xMm < -SHAFT_LIMIT ||
+        r.xMm > SHAFT_LIMIT || r.velocity < -MAX_VELOCITY || r.velocity > MAX_VELOCITY ||
         r.worldTick > r.junction * SECTION_TICKS + ENTRY_TICK)
         throw std::invalid_argument("invalid tunnel prediction request");
     for (const auto &route : c.routes) {
@@ -69,8 +77,8 @@ void validate(const Course &c, const Request &r) {
             route.lateralNoise > 500)
             throw std::invalid_argument("invalid tunnel route");
         for (const auto &o : route.obstacles)
-            if (o.kind > 3 || o.period < 6 || o.period > 9 || std::abs(o.offset) > 2000 ||
-                o.extent < 0 || o.extent > 3000 || o.amplitude < 0 || o.amplitude > 2000 ||
+            if (o.kind > 3 || o.period < 6 || o.period > 9 || std::abs(o.offset) > 3000 ||
+                o.extent < 0 || o.extent > 4000 || o.amplitude < 0 || o.amplitude > 2000 ||
                 o.opening < 0 || (o.kind == 3u && o.opening > o.extent))
                 throw std::invalid_argument("invalid tunnel obstacle");
     }

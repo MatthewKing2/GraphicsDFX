@@ -1,0 +1,13 @@
+// Shared C++/GLSL course dimensions. Distances are millimetres; time is 60 Hz ticks.
+#ifndef TUNNEL_CONFIG_INCLUDED
+#define TUNNEL_CONFIG_INCLUDED
+#define TUNNEL_SECTION_TICKS 720u
+#define TUNNEL_ENTRY_TICK 180u
+#define TUNNEL_MERGE_TICK 676u
+#define TUNNEL_OBSTACLES 10u
+#define TUNNEL_FIRST_HAZARD 240u
+#define TUNNEL_HAZARD_SPACING 45u
+#define TUNNEL_HALF_PITCH 4000
+#define TUNNEL_LOCAL_LIMIT 3320
+#define TUNNEL_SHAFT_LIMIT 15800
+#endif
