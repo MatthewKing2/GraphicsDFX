@@ -1,0 +1,29 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=64) in;
+// The shared include also declares the game's hazard helpers. They are unused
+// and optimized away here; only reactorStep is executed by this standalone tool.
+struct Obstacle { uint kind,phase,period,flags; int offset,extent,amplitude,opening; };
+struct Route { uint choiceCount,seed,reactionTicks,lateralNoise; Obstacle obstacles[10]; };
+struct Pose { int center,cosine,sine,aperture; };
+struct Target { int x,z; };
+struct ReactorState { uint words[16]; };
+layout(binding=0,std430) readonly buffer Rules { uint reactorRules[128]; } course;
+layout(binding=1,std430) readonly buffer Initial { ReactorState state; } initial;
+layout(binding=2,std430) writeonly buffer Output { ReactorState states[]; } outputData;
+layout(push_constant) uniform Parameters { uint samples,steps,mask,tick,seed; } p;
+#define COURSE_PARAM
+#define COURSE_ARG
+#define INOUT_UINT inout uint
+#include "../../shaders/tunnel_math.inc"
+#include "../../shaders/reactor_kernel.inc"
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    if(id>=p.samples) return;
+    ReactorState state=initial.state;
+    uint rng=mixSeed(p.seed^(id*0x9e3779b9u));
+    for(uint step=0u;step<p.steps;++step)
+        state=reactorStep(state,p.tick+(step+1u)*6u,p.mask,rng);
+    // Remains resident. Validation/readback happens OUTSIDE power timing.
+    outputData.states[id]=state;
+}

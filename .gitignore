@@ -57,3 +57,14 @@
 !graphics/vulkan/tests/nbody_test.cpp
 !graphics/vulkan/tests/benchmark.ps1
 !graphics/vulkan/tests/game-checks.ps1
+!graphics/vulkan/tools/
+!graphics/vulkan/tools/relay_lab/
+!graphics/vulkan/tools/relay_lab/Makefile
+!graphics/vulkan/tools/relay_lab/compute.cpp
+!graphics/vulkan/tools/relay_lab/relay.comp
+!graphics/vulkan/tools/relay_lab/lab.py
+!graphics/vulkan/tools/relay_lab/measure_power.py
+!graphics/vulkan/tools/relay_lab/open.bat
+!docs/relay-lab.md
+!docs/relay-power-results.json
+!docs/relay-power-samples.csv
