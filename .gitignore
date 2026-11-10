@@ -1,6 +1,10 @@
 *
 
 !.gitignore
+!.gitmodules
+!fpga/
+!fpga/fpga_graphics_dfx
+!fpga/pixel_physics_viewer.py
 !docs/
 !docs/survival-game-mvp-plan.md
 !docs/survival-game.md

@@ -1,0 +1,4 @@
+[submodule "fpga/fpga_graphics_dfx"]
+	path = fpga/fpga_graphics_dfx
+	url = https://github.com/Saikrishna0215/fpga_graphics_dfx.git
+	branch = test/pixel-shell-v2
