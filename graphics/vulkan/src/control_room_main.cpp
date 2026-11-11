@@ -1,6 +1,7 @@
 #include "control_room.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <iostream>
 #include <stdexcept>
@@ -60,6 +61,7 @@ int main(int argc, char **argv) {
   try {
     bool test = false, profile = false, panelView = false, roomView = false;
     int frames = 0;
+    float artTime = -1;
     std::string capture;
     plant::Config config;
     controlroom::Settings settings;
@@ -82,6 +84,12 @@ int main(int argc, char **argv) {
         panelView = true;
       else if (arg == "--room-view")
         roomView = true;
+      else if (arg == "--fog")
+        settings.fogDensity = std::stof(value());
+      else if (arg == "--ambient")
+        settings.ambientLight = std::stof(value());
+      else if (arg == "--art-time")
+        artTime = std::stof(value());
       else if (arg == "--reactors")
         config.reactors = uint32_t(std::stoul(value()));
       else if (arg == "--rods")
@@ -104,7 +112,9 @@ int main(int argc, char **argv) {
                   << "Options: --self-test --profile --frames N --capture "
                      "file.bmp --panel-view --room-view\n"
                   << "         --reactors N --rods N --banks N --plugs N "
-                     "--segments N --trials N\n";
+                     "--segments N --trials N\n"
+                  << "         --fog 0.13 --ambient 1.0 --art-time SECONDS "
+                     "(freeze visual pulse for captures)\n";
         return 0;
       } else
         throw std::invalid_argument("unknown option: " + arg);
@@ -114,7 +124,10 @@ int main(int argc, char **argv) {
       throw std::invalid_argument(
           "this physical panel fits up to 4 reactors / 12 rods per row");
     if (!settings.forecastTrials || settings.forecastTrials > 4096 ||
-        frames < 0)
+        frames < 0 || !std::isfinite(settings.fogDensity) ||
+        settings.fogDensity < 0 || settings.fogDensity > 1 ||
+        !std::isfinite(settings.ambientLight) || settings.ambientLight < 0 ||
+        settings.ambientLight > 4 || !std::isfinite(artTime))
       throw std::invalid_argument("invalid trial/frame count");
     if (test) {
       plant::selfTest();
@@ -125,7 +138,8 @@ int main(int argc, char **argv) {
 
     // CPU compute + GPU rendering baseline; backend does not see the room.
     Renderer renderer(1280, 720, "VESSEL 09 - Reactor control room",
-                      controlroom::cubeMesh(), 30000, profile);
+                      controlroom::cubeMesh(), 30000, profile,
+                      {"build/room-vert.spv", "build/room-frag.spv"});
     GameInput input(renderer);
     auto backend = plant::createBackend();
     backend->reset(config, plant::initialState(config));
@@ -232,12 +246,14 @@ int main(int argc, char **argv) {
       }
       auto build = Clock::now();
       room.draw(scene, config, panel, forecast, pending, float(elapsed), paused,
-                backend->name());
+                backend->name(), renderer.aspectRatio());
       sceneMs += ms(build);
       if (!capture.empty() && frame == (frames ? frames - 1 : 8))
         renderer.captureNextFrame(capture);
       auto draw = Clock::now();
-      renderer.drawScene(room.camera(renderer.aspectRatio()), scene);
+      renderer.drawScene(room.camera(renderer.aspectRatio(),
+                                     artTime < 0 ? float(elapsed) : artTime),
+                         scene);
       renderMs += ms(draw);
       FrameTimings timing;
       if (profile && renderer.readCompletedSceneTiming(timing)) {

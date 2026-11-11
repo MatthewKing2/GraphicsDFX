@@ -4,6 +4,12 @@ A separate native C++ / Vulkan first-person prototype. No Python runtime, game
 engine, new graphics dependencies, or external art assets. The older tunnel game,
 N-body program and Python experiments are still available, unchanged in purpose.
 
+The current room is a dark, biomechanical alien hull: broad irregular triangular
+facets, charcoal/grey chitin, black five-sided ribs and branching purple arteries
+with travelling heartbeat pulses. Procedural corrosion, grain and drifting
+depth/height fog replace the previous copper pipes and square floor tiles.
+This is cheap analytic fog, not a volumetric simulation. No image assets needed.
+
 ## Play the control room
 
 From Git Bash, starting at the repository root:
@@ -18,10 +24,11 @@ Or double-click `graphics/vulkan/control-room.bat`. If building in PowerShell,
 use `make control-room VULKAN_SDK=C:/VulkanSDK/1.4.341.1`.
 
 - WASD: walk. Mouse: look. Shift: move faster.
-- Walk towards the wall console, then press E to use it. Mouse becomes a pointer.
+- Walk towards and face the wall console, then press E to use it. Mouse becomes
+  a pointer and the panel opens as a clear, full-screen, letterboxed dashboard.
 - Click a rod, then click a power bank to move its cable to a free plug.
   Hover highlights its cable. Right click cancels selection.
-- E or Escape leaves the console. Outside the console, Escape pauses/releases
+- E or Escape leaves the console at the same position/view. Outside it, Escape pauses/releases
   the mouse; Escape again resumes. R resets the plant. Close the window to quit.
 
 The panel shows axial temperature gradients, unique rod/cable colors, delivered
@@ -33,7 +40,7 @@ Monte Carlo estimates, not guarantees or nuclear engineering calculations.
 
 Reactor time advances only while using the console, leaving the future coolant
 workload mutually exclusive. A clock-held message makes that visible. This is a
-room/panel MVP: the maintenance door isn't usable, spraying is not integrated,
+room/panel MVP: the sealed rear iris isn't usable, spraying is not integrated,
 and there is no loss screen yet. A latched runaway currently needs R to reset.
 
 ## Compute boundary and tuning
@@ -70,6 +77,13 @@ in `controlroom::Settings`. Quick layout overrides, for example:
 ./build/control_room_cpu.exe --reactors 1 --rods 8 --banks 3 --plugs 4 --segments 64 --trials 32
 ```
 
+Visual iteration: `--fog 0.13` changes haze density (`0` disables it),
+`--ambient 1.0` changes ambient light strength. `--art-time 0.9` freezes just the
+shader animation for reproducible screenshots; it doesn't freeze reactor time.
+The room has its own `room.vert` / `room.frag`, leaving the old game's shaders
+alone. `FrameTransforms.atmosphere` is graphics-only; reactor state, neutron
+compute and the backend interface are unchanged by this art pass.
+
 Counts are validated. The physical panel supports up to four reactor rows and
 twelve rods per row, within the backend's 32-rod total. Larger layouts need a
 larger/paged display, not a different compute interface. Existing Python TOML
@@ -79,19 +93,29 @@ files are preserved; this C++ MVP doesn't parse them.
 
 `make control-room-test` runs deterministic CPU tests, routing/full-plug checks,
 forecast isolation/critical-union checks, camera bounds, console transitions and
-camera-projection-to-panel picking tests. `--profile` prints average host scene
+letterboxed panel picking at 4:3, 16:9 and 21:9. `--profile` prints average host scene
 build, renderer call, GPU render, plant tick and background forecast times.
 Forecast time overlaps rendering; these numbers must not be added as a frame
 breakdown or interpreted as energy measurements.
 
 `tests/control-room-checks.ps1` runs hidden, bounded Vulkan/synchronization checks
-and saves room/panel/alternate-layout BMPs under `build/`. For a manual capture:
+and saves room/panel/alternate-layout, pulse-phase and fog comparison BMPs under
+`build/`. For a manual capture:
 
 ```bash
 ./build/control_room_cpu.exe --panel-view --frames 180 --capture build/panel.bmp --profile
 ```
 
-Checked on the development laptop: the CPU tests and all three room Vulkan/
+Alien art pass checked: six room/console/layout/pulse/fog runs completed with
+Vulkan synchronization validation and no errors. Screenshots were inspected;
+the two frozen pulse phases visibly differ, and the no-fog reference exposes
+the hull geometry. The console test ran 300 frames in 5.18 seconds (~58 FPS at
+the cap), with about 0.26 ms GPU time for the room and 0.16 ms for the dashboard
+in these short laptop checks. CPU tests include letterboxed mouse picking at
+three aspect ratios. The older game's CPU/GPU validation, rendered regressions
+and the N-body CPU/GPU regression suite also passed after the graphics changes.
+
+Initial industrial-style room check (before the alien art pass): the CPU tests and all three room Vulkan/
 synchronization checks passed; room, console and alternate-layout screenshots
 were inspected. A 300-frame console run took 5.24 seconds (~57 FPS at the 60 FPS
 cap): about 0.27 ms scene construction, 0.22 ms GPU rendering, 0.15 ms per thermal

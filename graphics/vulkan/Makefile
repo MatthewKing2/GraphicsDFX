@@ -43,7 +43,13 @@ PLANT_BACKEND_SRC = src/plant_$(PLANT_BACKEND).cpp
 ROOM_SRC = src/control_room_main.cpp src/control_room.cpp src/plant_compute.cpp $(PLANT_BACKEND_SRC) src/game_input.cpp src/renderer.cpp src/nbody.cpp
 ROOM_HEADERS = src/control_room.hpp src/plant_compute.hpp src/game_input.hpp src/renderer.hpp src/nbody.hpp src/profiling.hpp src/compute_context.hpp
 
-control-room: build/scene.spv build/frag.spv build/control_room_$(PLANT_BACKEND).exe
+control-room: build/room-vert.spv build/room-frag.spv build/control_room_$(PLANT_BACKEND).exe
+
+build/room-vert.spv: shaders/room.vert | build
+	$(GLSLC) $< -o $@
+
+build/room-frag.spv: shaders/room.frag | build
+	$(GLSLC) $< -o $@
 
 build/control_room_$(PLANT_BACKEND).exe: $(ROOM_SRC) $(ROOM_HEADERS) | build
 	$(CXX) $(ROOM_SRC) $(CXXFLAGS) $(INCLUDES) $(LIBS) -o $@

@@ -101,7 +101,8 @@ static std::array<VkVertexInputAttributeDescription, 3> vertexAttributeDescripti
 }
 
 static_assert(sizeof(glm::mat4) == 64, "shader expects a 64-byte model matrix");
-static_assert(sizeof(FrameTransforms) == 128, "shader expects two packed mat4s");
+static_assert(sizeof(FrameTransforms) == 144, "two packed mat4s plus scene atmosphere");
+static_assert(offsetof(FrameTransforms, atmosphere) == 128, "shader atmosphere offset");
 static_assert(offsetof(FrameTransforms, projection) == 64, "shader matrix offsets must match");
 static_assert(sizeof(gpu_particle) == 32, "shader expects a 32-byte particle");
 static_assert(offsetof(gpu_particle, velocity) == 16, "shader particle offsets must match");
@@ -939,8 +940,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(sceneMode ? "build/scene.spv" : "build/vert.spv");
-        auto fragShaderCode = readFile("build/frag.spv");
+        auto vertShaderCode = readFile(sceneMode ? options.sceneShaders.vertex : "build/vert.spv");
+        auto fragShaderCode = readFile(sceneMode ? options.sceneShaders.fragment : "build/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -2408,13 +2409,19 @@ Renderer::Renderer(
 
 Renderer::~Renderer() = default;
 
-Renderer::Renderer(uint32_t width, uint32_t height, const char* title,
-    const Mesh& mesh, uint32_t capacity, bool measureTimings)
-    : impl(std::make_unique<Impl>(width, height, title, std::vector<Mesh>{mesh},
-        std::vector<gpu_particle>{}, "", [measureTimings] { RendererOptions o;
-            o.measureTimings = measureTimings; return o; }(), capacity)) {}
+Renderer::Renderer(uint32_t width, uint32_t height, const char *title, const Mesh &mesh, uint32_t capacity,
+                   bool measureTimings, const SceneShaders &shaders)
+    : impl(std::make_unique<Impl>(
+          width, height, title, std::vector<Mesh>{mesh}, std::vector<gpu_particle>{}, "",
+          [measureTimings, &shaders] {
+              RendererOptions o;
+              o.measureTimings = measureTimings;
+              o.sceneShaders = shaders;
+              return o;
+          }(),
+          capacity)) {}
 
-void Renderer::drawScene(const FrameTransforms& transforms, const std::vector<SceneInstance>& objects) {
+void Renderer::drawScene(const FrameTransforms &transforms, const std::vector<SceneInstance> &objects) {
     impl->drawScene(transforms, objects);
 }
 bool Renderer::readCompletedSceneTiming(FrameTimings& result) { return impl->readCompletedSceneTiming(result); }

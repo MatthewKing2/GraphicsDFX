@@ -46,10 +46,17 @@ struct SimulationParameters {
 
 enum class SimulationMode { CpuAllPairs, CpuBarnesHut, GpuAllPairs, GpuBarnesHut };
 
+// Scene-specific art direction without replacing shaders used by older apps.
+struct SceneShaders {
+    std::string vertex = "build/scene.spv";
+    std::string fragment = "build/frag.spv";
+};
+
 struct RendererOptions {
     SimulationMode mode = SimulationMode::GpuAllPairs;
     bool measureTimings = false;
     bool uncappedPresentation = false;
+    SceneShaders sceneShaders;
 };
 
 struct FrameTimings {
@@ -63,6 +70,9 @@ struct FrameTimings {
 struct FrameTransforms {
     alignas(16) glm::mat4 view{1.0f};
     alignas(16) glm::mat4 projection{1.0f};
+    // Optional scene graphics only: time, fog density, grain, ambient strength.
+    // Older shaders use just the unchanged first 128 bytes.
+    alignas(16) glm::vec4 atmosphere{0.0f};
 };
 
 // Game-owned objects, independent of the N-body simulation. tint.w < 0 means
@@ -87,7 +97,8 @@ public:
     ~Renderer();
 
     Renderer(std::uint32_t width, std::uint32_t height, const char* title,
-        const Mesh& mesh, std::uint32_t instanceCapacity, bool measureTimings = false);
+        const Mesh& mesh, std::uint32_t instanceCapacity, bool measureTimings = false,
+        const SceneShaders& shaders = {});
     void drawScene(const FrameTransforms&, const std::vector<SceneInstance>&);
     // Completed frame-slot timings; never adds a wait/readback to the render loop.
     bool readCompletedSceneTiming(FrameTimings&);

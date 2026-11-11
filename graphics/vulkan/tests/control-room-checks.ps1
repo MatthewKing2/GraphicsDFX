@@ -42,4 +42,7 @@ try {
     Check-Room 'overview' @('--room-view','--frames','90','--profile','--capture','build/control-room.bmp')
     Check-Room 'console' @('--panel-view','--frames','300','--profile','--capture','build/control-panel.bmp')
     Check-Room 'alternate-layout' @('--panel-view','--reactors','1','--rods','8','--banks','3','--plugs','4','--segments','64','--trials','16','--frames','90','--capture','build/control-layout.bmp')
+    Check-Room 'pulse-a' @('--room-view','--art-time','0','--frames','45','--capture','build/control-pulse-a.bmp')
+    Check-Room 'pulse-b' @('--room-view','--art-time','0.9','--frames','45','--capture','build/control-pulse-b.bmp')
+    Check-Room 'no-fog' @('--room-view','--fog','0','--art-time','0','--frames','45','--capture','build/control-no-fog.bmp')
 } finally {$env:VK_LAYER_VALIDATE_SYNC=$oldSync}

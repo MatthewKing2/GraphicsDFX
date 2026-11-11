@@ -59,6 +59,8 @@
 !graphics/vulkan/shaders/bh_build.comp
 !graphics/vulkan/shaders/bh_force.comp
 !graphics/vulkan/shaders/scene.vert
+!graphics/vulkan/shaders/room.vert
+!graphics/vulkan/shaders/room.frag
 !graphics/vulkan/shaders/predict.comp
 !graphics/vulkan/shaders/prediction_kernel.inc
 !graphics/vulkan/shaders/tunnel_math.inc

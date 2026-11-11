@@ -8,9 +8,9 @@
 namespace controlroom {
 namespace {
 using V = glm::vec3;
-constexpr float PanelZ = -3.67f, PanelWidth = 6.4f, PanelHeight = 2.12f;
-const V copper(.34f, .16f, .065f), steel(.12f, .15f, .14f),
-    amber(.95f, .43f, .08f), mint(.38f, .9f, .59f), dim(.11f, .3f, .23f),
+constexpr float PanelZ = -3.85f, PanelWidth = 3.2f, PanelHeight = 1.6f,
+                PanelTop = 2.85f;
+const V amber(.95f, .43f, .08f), mint(.53f, .65f, .72f), dim(.19f, .22f, .29f),
     danger(.98f, .1f, .04f);
 void box(std::vector<SceneInstance> &s, V p, V size, V color, float mode = 4) {
   SceneInstance i;
@@ -34,14 +34,53 @@ void beam(std::vector<SceneInstance> &s, V a, V b, float width, V color,
   i.tint = glm::vec4(color, mode);
   s.push_back(i);
 }
-void hoop(std::vector<SceneInstance> &s, V center, float radius, V color,
-          bool vertical = true) {
-  for (int k = 0; k < 8; ++k) {
-    float a = k * glm::pi<float>() / 4, b = (k + 1) * glm::pi<float>() / 4;
-    V p(std::cos(a), vertical ? std::sin(a) : 0, vertical ? 0 : std::sin(a));
-    V q(std::cos(b), vertical ? std::sin(b) : 0, vertical ? 0 : std::sin(b));
-    beam(s, center + p * radius, center + q * radius, .045f, color);
+// Closed, thin triangular prisms. Both sides render correctly without turning
+// backface culling off. Large non-coplanar triangles are the room's actual
+// shape.
+void facet(std::vector<SceneInstance> &scene, V a, V b, V c, V color,
+           float material = 5) {
+  V middle = (a + b) * .5f, edge = b - a, tip = c - middle;
+  if (glm::length(glm::cross(edge, tip)) < .00001f)
+    return;
+  SceneInstance object;
+  object.transform[0] = glm::vec4(edge, 0);
+  object.transform[1] =
+      glm::vec4(glm::normalize(glm::cross(tip, edge)) * .008f, 0);
+  object.transform[2] = glm::vec4(tip, 0);
+  object.transform[3] = glm::vec4((middle + c) * .5f, 1);
+  object.tint = glm::vec4(color, material);
+  scene.push_back(object);
+}
+void shard(std::vector<SceneInstance> &scene, V center, V scale, V color) {
+  const V points[] = {V(1, 0, 0), V(0, 0, 1), V(-1, 0, 0), V(0, 0, -1)};
+  for (int side = 0; side < 4; ++side) {
+    V a = center + points[side] * scale,
+      b = center + points[(side + 1) % 4] * scale;
+    facet(scene, a, b, center + V(0, scale.y, 0),
+          color * (side % 2 ? .78f : 1.0f));
+    facet(scene, b, a, center - V(0, scale.y, 0), color * .55f);
   }
+}
+void tendon(std::vector<SceneInstance> &scene, V a, V b, float radius, V color,
+            float material = 5) {
+  V direction = glm::normalize(b - a);
+  V x = glm::normalize(glm::cross(
+      direction, std::abs(direction.y) < .9f ? V(0, 1, 0) : V(0, 0, 1)));
+  V y = glm::cross(direction, x);
+  // Five-sided, deliberately angular tubing, not square-section pipes.
+  for (int side = 0; side < 5; ++side) {
+    float p = side * glm::two_pi<float>() / 5,
+          q = (side + 1) * glm::two_pi<float>() / 5;
+    V u = (x * std::cos(p) + y * std::sin(p)) * radius;
+    V v = (x * std::cos(q) + y * std::sin(q)) * radius;
+    facet(scene, a + u, b + u, b + v, color, material);
+    facet(scene, a + u, b + v, a + v, color * .83f, material);
+  }
+}
+glm::vec2 panelExtent(float aspect) {
+  // A 2:1 dashboard letterboxed into any window. Same mapping for hit tests.
+  float x = std::min(.94f, 1.8f / std::max(.1f, aspect));
+  return {x, x * aspect * .5f};
 }
 std::array<uint8_t, 7> glyph(char c) {
   switch (c) {
@@ -132,7 +171,7 @@ std::array<uint8_t, 7> glyph(char c) {
   }
 }
 V panelPoint(float x, float y, float depth = 0) {
-  return {(x / 1000 - .5f) * PanelWidth, 3.17f - y / 500 * PanelHeight,
+  return {(x / 1000 - .5f) * PanelWidth, PanelTop - y / 500 * PanelHeight,
           PanelZ + depth};
 }
 void rect(std::vector<SceneInstance> &s, float x, float y, float w, float h,
@@ -147,8 +186,8 @@ void text(std::vector<SceneInstance> &s, float x, float y,
     for (int row = 0; row < 7; ++row)
       for (int col = 0; col < 5; ++col)
         if (rows[row] & (1 << (4 - col)))
-          rect(s, x + col * scale, y + row * scale * 1.4f, scale * .83f,
-               scale * .83f * 1.4f, color, depth);
+          rect(s, x + col * scale, y + row * scale, scale * .98f,
+               scale * .98f, color, depth);
     x += 6 * scale;
   }
 }
@@ -211,140 +250,139 @@ Mesh cubeMesh() {
 }
 Room::Room(Settings s) : settings(s) { buildRoom(); }
 void Room::buildRoom() {
-  auto &s = architecture;
-  s.reserve(8000);
-  box(s, {0, -.15f, 0}, {10, .3f, 10}, {.12f, .13f, .11f});
-  box(s, {0, 3.7f, 0}, {10, .3f, 10}, {.075f, .09f, .08f});
-  box(s, {0, 1.8f, -4}, {10, 3.6f, .3f}, {.16f, .19f, .16f});
-  box(s, {0, 1.8f, 5}, {10, 3.6f, .3f}, {.13f, .15f, .14f});
-  for (int side : {-1, 1})
-    box(s, {side * 5.0f, 1.8f, 0}, {.3f, 3.6f, 10}, {.12f, .14f, .12f});
-  // Mismatched steel plates, panel seams, bolts and rust: all cheap instancing.
-  for (int x = -4; x <= 4; ++x)
-    for (int z = -4; z < 5; ++z) {
-      float variation = float((x * 17 + z * 13 + 200) % 7) * .009f;
-      box(s, {x + .5f, .009f, z + .5f}, {.965f, .015f, .965f},
-          V(.14f + variation, .15f + variation, .13f + variation));
-      for (float dx : {-.42f, .42f})
-        box(s, {x + .5f + dx, .025f, z + .08f}, {.035f, .025f, .035f},
-            copper * .6f);
-      // Grating slots and pools of grime; no texture assets or dependencies.
-      if ((x + z + 20) % 4 == 0)
-        for (int k = 0; k < 7; ++k)
-          box(s, {x + .5f, .027f, z + .21f + k * .085f}, {.65f, .01f, .025f},
-              {.035f, .04f, .032f});
-      if ((x * 5 + z * 3 + 100) % 6 == 0)
-        box(s, {x + .55f, .029f, z + .53f}, {.37f, .008f, .26f},
-            {.06f, .048f, .025f});
+  auto &scene = architecture;
+  scene.reserve(2400);
+  // A skewed eight-sided hull, not a box with rectangular wall panels.
+  const glm::vec2 section[] = {{-3.8f, 0},     {3.8f, 0},     {4.7f, 1.1f},
+                               {4.25f, 3.45f}, {2.5f, 4.25f}, {-2.9f, 4.1f},
+                               {-4.4f, 3.1f},  {-4.7f, 1.15f}};
+  const float stations[] = {-4.45f, -2.5f, -.4f, 1.9f, 4.9f};
+  auto point = [&](int ring, int side) {
+    auto p = section[side % 8];
+    float wobble = std::sin(float(ring * 13 + side * 7)) * .13f;
+    p.x += wobble;
+    if (side > 1)
+      p.y += std::cos(float(ring * 5 + side * 3)) * .12f;
+    return V(p, stations[ring]);
+  };
+  for (int ring = 0; ring < 4; ++ring)
+    for (int side = 0; side < 8; ++side) {
+      V a = point(ring, side), b = point(ring, (side + 1) % 8);
+      V c = point(ring + 1, (side + 1) % 8), d = point(ring + 1, side);
+      V center = (a + b + c + d) * .25f;
+      V inward = glm::normalize(V(-center.x, 1.9f - center.y, 0));
+      center +=
+          inward * (.09f + .15f * std::abs(std::sin(float(side * 11 + ring))));
+      float grey = .12f + .025f * float((side * 5 + ring * 3) % 4);
+      V color(grey * .83f, grey * .86f, grey);
+      if (side == 0)
+        color *= .76f;
+      facet(scene, a, b, center, color);
+      facet(scene, b, c, center, color * .68f);
+      facet(scene, c, d, center, color * .87f);
+      facet(scene, d, a, center, color * .57f);
     }
-  for (int x = -4; x <= 4; ++x) {
-    box(s, {float(x), 1.8f, -3.81f}, {.055f, 3.5f, .05f}, steel * .45f);
-    for (int y = 0; y < 4; ++y)
-      for (float dx : {-.075f, .075f})
-        box(s, {x + dx, .18f + y * .87f, -3.77f}, {.03f, .03f, .035f}, copper);
-    // Repeated ribs over the ceiling and down the side walls.
-    box(s, {0, 3.48f, float(x)}, {9.8f, .16f, .14f}, steel);
-    for (int side : {-1, 1})
-      box(s, {side * 4.8f, 1.8f, float(x)}, {.18f, 3.4f, .14f}, steel);
+  // Uneven end walls are also broad facets, with no square door frames.
+  for (int end : {0, 4}) {
+    V hub(.3f, 1.9f, stations[end] + (end == 0 ? .1f : -.1f));
+    for (int side = 0; side < 8; ++side)
+      facet(scene, point(end, side), point(end, (side + 1) % 8), hub,
+            V(.115f, .12f, .14f) * (side % 2 ? .7f : 1.0f));
   }
-  // Dense copper/iron pipework, octagonal flanges and red hand wheels.
-  for (int k = 0; k < 5; ++k) {
-    float x = -4.55f + k * .27f;
-    beam(s, {x, 3.2f, -3.7f}, {x, 3.2f, 4.7f}, .16f, k % 2 ? steel : copper);
-    for (int z = -3; z < 5; z += 2)
-      box(s, {x, 3.2f, float(z)}, {.23f, .23f, .10f}, copper * .7f);
-  }
-  for (int k = 0; k < 3; ++k) {
-    float x = 3.65f + k * .38f;
-    beam(s, {x, .2f, -3.55f}, {x, 3.27f, -3.55f}, .2f, k % 2 ? copper : steel);
-    beam(s, {x, 3.27f, -3.55f}, {x, 3.27f, 4.6f}, .2f, copper * .65f);
-    for (float y : {.5f, 1.6f, 2.9f}) {
-      hoop(s, {x, y, -3.38f}, .16f, copper);
-      box(s, {x, y, -3.43f}, {.29f, .08f, .3f}, steel);
+  // Structural ribs read as black bones rather than a neat grid of pipework.
+  for (int ring : {1, 3})
+    for (int side = 1; side < 8; ++side) {
+      V a = point(ring, side), b = point(ring, (side + 1) % 8);
+      a = V(a.x * .94f, 1.9f + (a.y - 1.9f) * .94f, a.z);
+      b = V(b.x * .94f, 1.9f + (b.y - 1.9f) * .94f, b.z);
+      tendon(scene, a, b, .14f, {.075f, .072f, .085f});
     }
-    hoop(s, {x, 1.5f, -3.16f}, .2f, {.48f, .055f, .02f});
-    beam(s, {x - .18f, 1.5f, -3.16f}, {x + .18f, 1.5f, -3.16f}, .035f, copper);
-    beam(s, {x, 1.32f, -3.16f}, {x, 1.68f, -3.16f}, .035f, copper);
-  }
-  // CRT bezel, battered console plinth, protective trim and warning stripes.
-  box(s, {0, 1.77f, -3.7f}, {6.9f, 3.1f, .36f}, {.18f, .2f, .15f});
-  box(s, {0, 1.79f, -3.49f}, {6.66f, 2.96f, .08f}, {.03f, .04f, .025f});
-  // Screen is in front of the bezel: panel coordinates are on its front plane.
-  box(s, {0, 1.79f, PanelZ + .22f}, {6.48f, 2.82f, .02f}, {.025f, .038f, .026f},
-      3);
-  box(s, {0, .44f, -2.98f}, {6.7f, .64f, 1.15f}, {.16f, .19f, .14f});
-  box(s, {0, .8f, -2.92f}, {6.8f, .12f, 1.15f}, steel);
-  for (int k = -15; k <= 15; ++k) {
-    box(s, {k * .2f, .87f, -2.61f}, {.12f, .04f, .13f},
-        k % 4 ? V(.17f, .2f, .17f) : amber * .7f);
-    box(s, {k * .21f, .48f, -2.39f}, {.075f, .38f, .015f}, {.04f, .05f, .035f});
-  }
-  for (int k = 0; k < 12; ++k) {
-    box(s, {-3.26f + k * .59f, 3.27f, -3.38f}, {.035f, .035f, .035f}, copper);
-    box(s, {-3.26f + k * .59f, .32f, -3.38f}, {.035f, .035f, .035f}, copper);
-  }
-  // Chunky equipment racks / cracked instruments at the sides.
+  // Sparse branching arteries follow coarse bent paths, with exposed purple
+  // channels on their inward-facing side. Color pulses travel in the shader.
+  auto artery = [&](const std::vector<V> &path, float radius, V inward) {
+    for (size_t k = 1; k < path.size(); ++k) {
+      tendon(scene, path[k - 1], path[k], radius, {.043f, .032f, .055f});
+      V offset = inward * radius * .96f;
+      tendon(scene, path[k - 1] + offset, path[k] + offset, radius * .27f,
+             {.34f, .018f, .65f}, 6);
+      if (k % 3 == 0)
+        shard(scene, path[k], V(radius * 1.7f, radius * 1.5f, radius * 1.5f),
+              {.065f, .045f, .08f});
+    }
+  };
   for (int side : {-1, 1}) {
-    for (int k = 0; k < 3; ++k) {
-      float z = -1.5f + k * 1.6f, x = side * 4.25f;
-      box(s, {x, 1.3f, z}, {1.05f, 2.6f, 1.25f}, steel * .8f);
-      box(s, {x - side * .55f, 1.55f, z}, {.03f, 1.9f, 1.06f},
-          {.055f, .065f, .04f});
-      for (int light = 0; light < 5; ++light)
-        box(s, {x - side * .58f, .9f + light * .26f, z - .3f},
-            {.025f, .065f, .065f}, light % 3 ? mint * .32f : amber, 3);
-      for (int slot = 0; slot < 9; ++slot)
-        box(s, {x - side * .58f, 2.1f, z - .35f + slot * .09f},
-            {.025f, .3f, .025f}, steel * .6f);
+    for (int track = 0; track < 2; ++track) {
+      std::vector<V> path;
+      for (int k = 0; k < 9; ++k) {
+        float z = -4.2f + k * 1.1f;
+        float y = .9f + track * 1.75f + std::sin(k * .9f + track) * .38f;
+        path.push_back({side * (4.26f - .18f * std::sin(k * .8f)), y, z});
+      }
+      artery(path, track ? .14f : .19f, V(-float(side), 0, 0));
+      for (int branch : {2, 5, 7}) {
+        V a = path[branch];
+        V b = a + V(-side * .13f, track ? -.42f : .45f, .35f);
+        V c = b + V(-side * .12f, track ? -.65f : .68f, .55f);
+        artery({a, b, c}, .065f, V(-float(side), 0, 0));
+      }
+    }
+    // Knuckled root-like machinery growing out of each side of the floor.
+    for (int k = 0; k < 4; ++k) {
+      float z = -2.4f + k * 1.9f;
+      shard(scene, {side * 3.8f, .55f, z}, {.65f, .9f, .65f},
+            {.075f, .073f, .09f});
+      tendon(scene, {side * 3.8f, .8f, z}, {side * 4.25f, 2.7f, z + .45f}, .11f,
+             {.08f, .075f, .095f});
     }
   }
-  // Rear bulkhead door and warning sign; chamber is intentionally next
-  // milestone.
-  box(s, {.65f, 1.35f, 4.79f}, {2.5f, 2.7f, .12f}, copper * .8f);
-  box(s, {.65f, 1.35f, 4.70f}, {2.12f, 2.48f, .12f}, steel);
-  box(s, {.65f, 1.35f, 4.61f}, {.055f, 2.42f, .04f}, {.03f, .04f, .025f});
-  for (int k = 0; k < 9; ++k) {
-    box(s, {-.34f + k * .25f, .22f, 4.60f}, {.14f, .18f, .03f},
-        k % 2 ? amber * .6f : V(.04f));
+  std::vector<V> spine;
+  for (int k = 0; k < 9; ++k)
+    spine.push_back({-.65f + std::sin(k * .9f) * .55f,
+                     3.86f + std::sin(k * .6f) * .09f, -4.2f + k * 1.1f});
+  artery(spine, .18f, {0, -1, 0});
+  // A rear sealed iris, with six large triangular vanes.
+  V iris(0, 1.9f, 4.65f);
+  for (int k = 0; k < 6; ++k) {
+    float a = k * glm::two_pi<float>() / 6,
+          b = (k + 1) * glm::two_pi<float>() / 6;
+    V p = iris + V(std::cos(a) * 1.25f, std::sin(a) * 1.4f, 0);
+    V q = iris + V(std::cos(b) * 1.25f, std::sin(b) * 1.4f, 0);
+    facet(scene, p, q, iris + V(.14f, -.05f, -.16f), {.075f, .07f, .095f});
+    tendon(scene, p, q, .045f, {.13f, .012f, .24f}, 6);
   }
-  // Caged practical lamps; luminous strips, not a physics-heavy lighting
-  // engine.
-  for (int z : {-2, 2}) {
-    box(s, {0, 3.46f, float(z)}, {1.7f, .13f, .42f}, steel * .5f);
-    box(s, {0, 3.35f, float(z)}, {1.45f, .045f, .19f}, {.8f, .56f, .25f}, 3);
-    for (int k = -3; k <= 3; ++k)
-      box(s, {k * .2f, 3.31f, float(z)}, {.025f, .06f, .25f}, steel);
+  // The monitor is the only intentionally rectangular surface. Its surround
+  // is a broken, bevelled chitin iris, embedded in a faceted pedestal.
+  const glm::vec2 inner[] = {{-1.72f, -.57f}, {-1.72f, .57f}, {-1.4f, .9f},
+                             {1.4f, .9f},     {1.72f, .57f},  {1.72f, -.57f},
+                             {1.4f, -.9f},    {-1.4f, -.9f}};
+  V center(0, 2.05f, -3.4f);
+  for (int k = 0; k < 8; ++k) {
+    auto p = inner[k], q = inner[(k + 1) % 8];
+    V a = center + V(p, 0), b = center + V(q, 0);
+    V c = center + V(q * 1.25f, -.35f), d = center + V(p * 1.25f, -.35f);
+    facet(scene, a, b, c, {.13f, .12f, .16f});
+    facet(scene, a, c, d, {.085f, .08f, .10f});
+    if (k % 2 == 0)
+      tendon(scene, a, b, .027f, {.21f, .025f, .38f}, 6);
   }
-  label(s, {-3.1f, 3.47f, -3.38f}, "VESSEL 09 / REACTOR CONTROL", .025f,
-        amber * .7f);
-  label(s, {-2.35f, 1.01f, -2.36f}, "E - USE CONSOLE    /    R - RESET PLANT",
-        .019f, {.55f, .6f, .4f});
-  // Loose cables on the floor, refuse, a toolbox and an abandoned stool.
-  for (int k = 0; k < 14; ++k) {
-    float a = float(k) * .25f;
-    beam(s, {2.7f + std::sin(a) * .25f, .06f, -1.8f + a},
-         {2.7f + std::sin(a + .25f) * .25f, .06f, -1.55f + a}, .035f,
-         {.035f, .04f, .025f});
+  shard(scene, {0, .65f, -3.55f}, {1.9f, .72f, .7f}, {.11f, .1f, .13f});
+  for (int side : {-1, 1}) {
+    artery({V(side * 3.9f, 1.9f, -4.05f), V(side * 2.7f, 2.3f, -3.95f),
+            V(side * 2.1f, 2.55f, -3.7f)},
+           .13f, {0, 0, 1});
+    shard(scene, {side * 1.95f, .9f, -3.28f}, {.27f, .48f, .35f},
+          {.08f, .075f, .10f});
   }
-  box(s, {-2.8f, .23f, 2.9f}, {.8f, .46f, .55f}, {.3f, .14f, .045f});
-  beam(s, {-3, .48f, 2.9f}, {-2.6f, .48f, 2.9f}, .055f, steel);
-  box(s, {-2.4f, .77f, -.2f}, {.52f, .12f, .48f}, {.23f, .15f, .075f});
-  for (float dx : {-.2f, .2f})
-    for (float dz : {-.18f, .18f})
-      beam(s, {-2.4f + dx, .05f, -.2f + dz}, {-2.4f + dx, .72f, -.2f + dz},
-           .055f, steel);
+  label(scene, {-1.04f, 1.02f, -2.95f}, "E / ACCESS CORE", .025f,
+        {.32f, .25f, .43f});
+  // A few jagged mineral/sludge patches rather than hundreds of square tiles.
   for (int k = 0; k < 12; ++k) {
-    SceneInstance scrap;
-    scrap.transform = glm::scale(
-        glm::rotate(glm::translate(glm::mat4(1), V(-3 + k * .22f, .055f,
-                                                   2.2f + std::sin(float(k)))),
-                    k * .7f, V(0, 1, 0)),
-        V(.15f, .025f, .11f));
-    scrap.tint = glm::vec4(k % 2 ? copper * .6f : V(.25f, .24f, .17f), 4);
-    s.push_back(scrap);
+    float x = std::sin(k * 2.7f) * 2.8f, z = std::cos(k * 1.6f) * 3.1f;
+    facet(scene, {x - .25f, .012f, z - .15f}, {x + .4f, .018f, z},
+          {x - .05f, .025f, z + .4f}, {.04f, .035f, .05f});
   }
 }
-FrameTransforms Room::camera(float aspect) const {
+FrameTransforms Room::camera(float aspect, float elapsed) const {
   V forward(std::sin(yaw) * std::cos(pitch), std::sin(pitch),
             -std::cos(yaw) * std::cos(pitch));
   FrameTransforms f;
@@ -352,6 +390,8 @@ FrameTransforms Room::camera(float aspect) const {
   f.projection =
       glm::perspective(glm::radians(settings.fieldOfView), aspect, .05f, 50.0f);
   f.projection[1][1] *= -1;
+  f.atmosphere = {elapsed, settings.fogDensity, settings.grain,
+                  settings.ambientLight};
   return f;
 }
 bool Room::input(const GameControls &in, float dt, float aspect,
@@ -363,13 +403,10 @@ bool Room::input(const GameControls &in, float dt, float aspect,
       yaw = savedYaw;
       pitch = savedPitch;
       console = false;
-    } else if (eye.z < .7f && std::abs(eye.x) < 3.5f) {
+    } else if (eye.z < .1f && std::abs(eye.x) < 2.25f && std::cos(yaw) > .35f) {
       savedEye = eye;
       savedYaw = yaw;
       savedPitch = pitch;
-      eye = {0, 1.80f, .15f};
-      yaw = 0;
-      pitch = 0;
       console = true;
     }
   }
@@ -383,30 +420,18 @@ bool Room::input(const GameControls &in, float dt, float aspect,
       move = glm::normalize(move);
     eye += move * (dt * settings.walkSpeed *
                    (in.sprint ? settings.sprintMultiplier : 1));
-    // Walkable aisle: keeps the camera out of fixed racks/console geometry.
-    eye.x = std::clamp(eye.x, -3.45f, 3.45f);
+    // Walkable aisle inside the sloping hull and its thick, root-like ribs.
+    eye.x = std::clamp(eye.x, -3.15f, 3.15f);
     eye.z = std::clamp(eye.z, -2.05f, 4.35f);
     hoveredRod = hoveredBank = -1;
     panelCursor = {-1, -1};
     return false;
   }
-  FrameTransforms f = camera(aspect);
-  glm::vec4 near = glm::inverse(f.projection * f.view) *
-                   glm::vec4(in.cursorX * 2 - 1, in.cursorY * 2 - 1, 0, 1);
-  glm::vec4 far = glm::inverse(f.projection * f.view) *
-                  glm::vec4(in.cursorX * 2 - 1, in.cursorY * 2 - 1, 1, 1);
-  V origin = V(near) / near.w,
-    direction = glm::normalize(V(far) / far.w - origin);
-  panelCursor = {-1, -1};
+  // Console view is a flat, letterboxed dashboard, not a perspective ray cast.
+  auto extent = panelExtent(aspect);
+  panelCursor = {(in.cursorX * 2 - 1 + extent.x) / (2 * extent.x) * 1000,
+                 (in.cursorY * 2 - 1 + extent.y) / (2 * extent.y) * 500};
   hoveredRod = hoveredBank = -1;
-  if (std::abs(direction.z) > .00001f) {
-    float distance = (PanelZ + .33f - origin.z) / direction.z;
-    if (distance > 0) {
-      V point = origin + direction * distance;
-      panelCursor = {(point.x / PanelWidth + .5f) * 1000,
-                     (3.17f - point.y) / PanelHeight * 500};
-    }
-  }
   float cellWidth = 510.0f / cfg.rodsPerReactor;
   for (uint32_t r = 0; r < plant::rodCount(cfg); ++r) {
     auto p = rodLocation(cfg, r);
@@ -443,28 +468,35 @@ void Room::routeResult(bool accepted) {
 }
 void Room::inspectionView(bool panel) {
   if (panel) {
+    savedEye = eye;
+    savedYaw = yaw;
+    savedPitch = pitch;
     console = true;
     eye = {0, 1.8f, .15f};
     yaw = 0;
     pitch = 0;
   } else {
     console = false;
-    eye = {2.3f, 1.7f, 2.1f};
-    yaw = -.28f;
-    pitch = .015f;
+    eye = {2.2f, 1.7f, 2.2f};
+    yaw = -.32f;
+    pitch = .08f;
   }
 }
 void Room::draw(std::vector<SceneInstance> &scene, const plant::Config &cfg,
                 const plant::Panel &p, const plant::Forecast &forecast,
                 bool predicting, float elapsed, bool paused,
-                const char *computeName) const {
+                const char *computeName, float aspect) const {
   scene = architecture;
-  // Native world-space CRT. Every glyph/gradient/wire uses the shared cube
-  // mesh. Screen front is in front of the console bezel (different Z layers
-  // below).
-  rect(scene, 0, 0, 1000, 500, {.008f, .026f, .02f}, .26f);
-  for (int y = 8; y < 495; y += 9)
-    rect(scene, 7, float(y), 986, .45f, {.014f, .04f, .028f}, .265f);
+  if (console) {
+    scene.clear();
+    SceneInstance background;
+    background.transform =
+        glm::scale(glm::translate(glm::mat4(1), V(0, 0, .12f)), V(2, 2, 0));
+    background.tint = glm::vec4(.006f, .008f, .013f, -1);
+    scene.push_back(background);
+  }
+  const size_t panelStart = scene.size();
+  rect(scene, 0, 0, 1000, 500, {.012f, .017f, .026f}, .26f);
   text(scene, 28, 20, "VESSEL 09 / CORE LOAD MANAGEMENT", 2.2f, mint, .31f);
   text(scene, 29, 46,
        "INTEGER NEUTRON TRANSPORT / " + std::to_string(cfg.capacityGW) +
@@ -479,8 +511,8 @@ void Room::draw(std::vector<SceneInstance> &scene, const plant::Config &cfg,
     bool shortage = p.bankDeliveredGW[b] < p.bankDemandGW[b];
     bool hover = hoveredBank == int(b);
     rect(scene, 740, y - 3, 235, h,
-         hover ? V(.2f, .3f, .18f) : V(.05f, .12f, .1f), .28f);
-    rect(scene, 744, y + 1, 227, h - 8, {.012f, .028f, .022f}, .29f);
+         hover ? V(.26f, .19f, .36f) : V(.07f, .085f, .12f), .28f);
+    rect(scene, 744, y + 1, 227, h - 8, {.018f, .024f, .037f}, .29f);
     const char *names[] = {"LIFE SUPPORT", "DRIVE CORE", "SHIP SYSTEMS",
                            "SHIELD GRID"};
     text(scene, 785, y + 4, b < 4 ? names[b] : "AUXILIARY", 1.55f, mint, .34f);
@@ -599,6 +631,21 @@ void Room::draw(std::vector<SceneInstance> &scene, const plant::Config &cfg,
        1.15f, mint * .6f, .34f);
   text(scene, 750, 474, "T " + std::to_string(p.tick) + " / " + computeName,
        1.15f, dim * 1.7f, .34f);
+  if (console) {
+    // Reuse the panel's native geometry/data in a readable 2D projection. Depth
+    // layers survive the conversion, so cables cannot overwrite bank labels.
+    auto extent = panelExtent(aspect);
+    glm::mat4 projection(1);
+    projection[0][0] = 2 * extent.x / PanelWidth;
+    projection[1][1] = -2 * extent.y / PanelHeight;
+    projection[3][1] = (2 * PanelTop / PanelHeight - 1) * extent.y;
+    projection[2][2] = -.1f;
+    projection[3][2] = .1f + .1f * PanelZ;
+    for (size_t i = panelStart; i < scene.size(); ++i) {
+      scene[i].transform = projection * scene[i].transform;
+      scene[i].tint.w = -1;
+    }
+  }
   // Very restrained aiming reticle; console uses the ordinary OS mouse cursor.
   if (!console && !paused) {
     SceneInstance dot;
@@ -622,24 +669,22 @@ bool Room::selfTest() {
   r.input(move, 0, 16.0f / 9, cfg, rod, bank);
   if (!r.console)
     throw std::runtime_error("console enter");
-  // Project a rod/bank point through the actual camera, then feed that cursor
-  // back through the inverse ray test. This covers Vulkan's flipped Y too.
-  auto click = [&](glm::vec2 point) {
-    auto f = r.camera(16.0f / 9);
-    glm::vec4 clip = f.projection * f.view *
-                     glm::vec4(panelPoint(point.x, point.y, .33f), 1);
-    GameControls c;
-    c.cursorX = (clip.x / clip.w + 1) * .5f;
-    c.cursorY = (clip.y / clip.w + 1) * .5f;
-    c.primary = true;
-    return r.input(c, 0, 16.0f / 9, cfg, rod, bank);
-  };
-  auto first = rodLocation(cfg, 0);
-  first.y += 20;
-  click(first);
-  bool route = click({870, bankY(cfg, 1) + 20});
-  if (!route || rod != 0 || bank != 1)
-    throw std::runtime_error("panel picking");
+  // The same aspect-aware letterbox is used for rendering and hit tests.
+  for (float aspect : {4.0f / 3, 16.0f / 9, 21.0f / 9}) {
+    auto click = [&](glm::vec2 point) {
+      auto extent = panelExtent(aspect);
+      GameControls c;
+      c.primary = true;
+      c.cursorX = ((point.x / 1000 * 2 - 1) * extent.x + 1) * .5f;
+      c.cursorY = ((point.y / 500 * 2 - 1) * extent.y + 1) * .5f;
+      return r.input(c, 0, aspect, cfg, rod, bank);
+    };
+    auto first = rodLocation(cfg, 0);
+    first.y += 20;
+    click(first);
+    if (!click({870, bankY(cfg, 1) + 20}) || rod != 0 || bank != 1)
+      throw std::runtime_error("letterboxed panel picking");
+  }
   r.input(move, 0, 16.0f / 9, cfg, rod, bank);
   if (r.console)
     throw std::runtime_error("console exit");

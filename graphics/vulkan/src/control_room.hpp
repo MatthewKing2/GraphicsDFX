@@ -10,6 +10,7 @@ namespace controlroom {
 struct Settings {
   float walkSpeed = 2.3f, sprintMultiplier = 1.6f, mouseSensitivity = .0022f;
   float fieldOfView = 68, predictionInterval = 3;
+  float fogDensity = .13f, grain = .09f, ambientLight = 1.0f;
   uint32_t forecastTrials = 64, forecastSeconds = 60;
 };
 Mesh cubeMesh();
@@ -31,10 +32,11 @@ public:
   bool input(const GameControls &, float dt, float aspect,
              const plant::Config &, uint32_t &routeRod, uint32_t &routeBank);
   void routeResult(bool accepted);
-  FrameTransforms camera(float aspect) const;
+  FrameTransforms camera(float aspect, float elapsed = 0) const;
   void draw(std::vector<SceneInstance> &, const plant::Config &,
             const plant::Panel &, const plant::Forecast &, bool predicting,
-            float elapsed, bool paused, const char *computeName) const;
+            float elapsed, bool paused, const char *computeName,
+            float aspect) const;
   void inspectionView(bool panel); // deterministic debug screenshot viewpoints
   static bool selfTest();
 };
