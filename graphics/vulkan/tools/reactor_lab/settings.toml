@@ -122,6 +122,10 @@ return_settle_seconds = 1.0
 [forecast]
 horizon_seconds = 60.0
 trials = 64
+# Bounded resident futures; changing this MUST NOT change the sampled outcomes.
+# Keep the CPU demo fast with a full batch; the audit also tests an 8-trial
+# on-chip target. Set to 8 to exercise that bounded-memory path in the demo.
+trial_batch_size = "= forecast.trials"
 refresh_seconds = 2.5
 seed = 8128
 
@@ -237,4 +241,3 @@ muted_color = "#89a8ad"
 linked_color = "#71e2c5"
 selected_color = "#ffffff"
 accent_color = "#ffc56b"
-

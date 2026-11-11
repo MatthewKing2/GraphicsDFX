@@ -19,7 +19,7 @@ _INTEGER_FIELDS = {
     "thermal": "hot_heat surge_heat critical_heat safe_heat heat_step cool_step ignition_loaded_256 ignition_quiet_256 ignition_per_hot_neighbor_256 ignition_if_hot_256 fault_recovery_loaded_256 fault_recovery_surge_256 fault_recovery_quiet_256 heating_256 heating_per_hot_neighbor_256 surge_heating_256 background_reheating_256 cooling_loaded_256 cooling_quiet_256 extra_quiet_cooling_256 runaway_heating_256 diffusion_256 diffusion_passes hotspot_loaded_256 hotspot_quiet_256 hotspot_heat_step",
     "connections": "neighbors_per_cell seed",
     "cooling": "group_size group_seed direct_heat_per_pulse linked_heat_per_pulse axial_radius_cells",
-    "forecast": "trials seed",
+    "forecast": "trials seed trial_batch_size",
     "foam": "steps_per_second grid_width grid_height gravity_every_steps diagonal_every_steps flow_every_steps debris_every_steps seed",
     "voxel": "width height depth steps_per_second rod_radius rod_columns nozzle_radius jet_radius jet_push_passes drain_every_steps debris_every_steps seed render_bands max_drawn_particles frame_milliseconds jet_particles_per_step jet_max_particles jet_splash_radius runoff_gravity_passes max_drawn_jet_particles max_simulation_steps_per_frame",
     "ui": "frame_milliseconds panel_columns panel_rod_columns room_rod_columns cell_width_pixels cell_height_pixels max_drawn_particles rod_height_pixels bank_columns bank_width_pixels bank_height_pixels cable_gap_pixels cable_width_pixels socket_radius_pixels spark_count",
@@ -270,6 +270,7 @@ class Config:
             raise ValueError("Repair deadline must exceed travel + treatment time")
         bounded(self.forecast.horizon_seconds, .05, 3600, "forecast.horizon_seconds")
         bounded(self.forecast.trials, 1, 8192, "forecast.trials")
+        bounded(self.forecast.trial_batch_size, 1, 8192, "forecast.trial_batch_size")
         if self.forecast.trials * count > 4_000_000:
             raise ValueError("Too many Python forecast states; reduce trials or total cells (limit 4,000,000)")
         bounded(self.forecast.refresh_seconds, .1, 120, "forecast.refresh_seconds")

@@ -199,7 +199,7 @@ class Lab:
                 if save or save_as:
                     if destination.exists():
                         destination.with_suffix(destination.suffix + ".bak").write_bytes(destination.read_bytes())
-                    destination.write_text(content + "\n", encoding="utf-8")
+                    destination.write_text(content + "\n", encoding="utf-8", newline="\n")
                 self.apply_config(cfg, destination, content)
                 editor.destroy()
             except (ValueError, OSError) as e:
@@ -433,6 +433,8 @@ class Lab:
             self.compute.configure(text=f"{cfg.forecast.trials} futures x {r.steps} steps\n"
                 f"{r.count:,} internal thermal points\nLast CPU batch: {self.forecast_ms:.1f} ms\n"
                 f"Snapshot: t={self.forecast_sim_time:g}s\n"
+                f"Resident futures: {min(cfg.forecast.trials,cfg.forecast.trial_batch_size)}\n"
+                f"Rod result payload: {4+2*r.total_rods} bytes\n"
                 "Assumes current routing remains.\nNo operator cooling in forecast.\n\n"
                 "Integer thermal/PRNG model.\nNo measured FPGA power claim.")
         elif self.phase == "failed":

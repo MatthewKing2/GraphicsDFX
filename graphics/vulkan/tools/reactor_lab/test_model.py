@@ -280,6 +280,32 @@ class ThermalTests(unittest.TestCase):
         rules_for({"layout":{"reactors":1,"rods_per_reactor":3,"cells_per_rod":1}})
         np.testing.assert_array_equal(after,r.forecast(w.heat,w.fault,sockets=w.sockets).rod_probability)
 
+    def test_micro_batches_preserve_every_rng_stream_and_result(self):
+        # Include an uneven final batch and intermediate probabilities.
+        original = rules_for({"forecast":{"trials":19,"trial_batch_size":19,"horizon_seconds":12.0}})
+        world = Reactor(original)
+        world.heat[:] = original.cfg.thermal.surge_heat-1
+        expected = original.forecast(world.heat,world.fault,tick=317,sockets=world.sockets)
+        for size in (1,3,8,64):
+            r = rules_for({"forecast":{"trials":19,"trial_batch_size":size,"horizon_seconds":12.0}})
+            actual = r.forecast(world.heat,world.fault,tick=317,sockets=world.sockets)
+            np.testing.assert_array_equal(actual.probability,expected.probability)
+            np.testing.assert_array_equal(actual.rod_probability,expected.rod_probability)
+            np.testing.assert_array_equal(actual.rod_hits,expected.rod_hits)
+            self.assertEqual(actual.persistent_batch_bytes,min(size,19)*r.count*7)
+            payload = actual.result_packet()
+            self.assertEqual(len(payload),4+2*r.total_rods)
+            self.assertEqual(int(np.frombuffer(payload[:4],dtype="<u4")[0]),19)
+            np.testing.assert_array_equal(np.frombuffer(payload[4:],dtype="<u2"),actual.rod_hits)
+
+    def test_forecast_compiles_load_once_per_step_not_per_batch(self):
+        from unittest.mock import patch
+        r = rules_for({"forecast":{"trial_batch_size":1}})
+        w = Reactor(r)
+        with patch.object(r,"operating_heat",wraps=r.operating_heat) as operating:
+            r.forecast(w.heat,w.fault,trials=8,sockets=w.sockets)
+            self.assertEqual(operating.call_count,r.steps)
+
     def test_cancel_and_smooth_start(self):
         r=Rules()
         w=Reactor(r)

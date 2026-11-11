@@ -368,10 +368,10 @@ class SprayApp:
             f"Repair fuse: {p.remaining:.0f}s\n\n"
             "Mouse: move hose outlet\nHold left: high-pressure jet\nAim marker ABOVE the nozzle\nRight drag: orbit in 3D\nWheel: zoom\n1..9: select another target\n\n"
             f"WORLD: {w.cfg.width}x{w.cfg.height}x{w.cfg.depth}\n{np.count_nonzero(w.cells==WATER):,} coolant voxels\n"
-            f"Grid only: {w.packed_bytes/1024:.1f} KiB\nJet has additional flight state\n"
+            f"Grid only: {w.packed_bytes/1024:.1f} KiB\nImpact command: 4 bytes + reply bit\n"
             f"In-flight packets: {len(s.jet.positions):,}\nJet speed: {w.cfg.jet_speed_voxels_per_second:g} voxels/s\n"
             f"Physics step: {s.simulation_ms:.2f} ms\nSoftware draw: {self.render_ms:.2f} ms\nDrawing {drawn:,} surface samples\n\n"
-            "CPU/NumPy prototype.\nNo GPU/FPGA power claim.\nNo thermal forecast runs here.\nJet adds velocity state.\nAfter impact: voxel runoff."
+            "CPU/NumPy prototype.\nNo GPU/FPGA power claim.\nNo thermal forecast runs here.\nOffload plan: flight stays host.\nFPGA: impacts / runoff / contacts."
             +( "\nPAUSED" if self.paused else ""))
         self.dirty=False
 

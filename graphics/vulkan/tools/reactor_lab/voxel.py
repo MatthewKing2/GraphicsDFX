@@ -108,12 +108,33 @@ class VoxelWorld:
                 self.cells[:,y,:][footprint] = WALL
                 self.node_map[:,y,:][footprint] = rules.node(chamber,rod,segment)
         self.solids = self.cells == WALL
+        # Geometry is immutable during a chamber visit. Compile only rod voxels
+        # exposed to a non-solid neighbor, not six full-volume scans per step.
+        shape = np.array(self.cells.shape)
+        rod_points = np.argwhere(self.node_map >= 0)
+        directions = np.array([[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]])
+        adjacent = rod_points[:,None,:] + directions
+        valid = np.all((adjacent >= 0) & (adjacent < shape), axis=2)
+        safe = np.clip(adjacent, 0, shape-1)
+        indices = np.ravel_multi_index(safe.transpose(2,0,1), self.cells.shape)
+        exposed = np.any(valid & ~self.solids.ravel()[indices], axis=1)
+        self.contact_neighbors = indices[exposed]
+        self.contact_valid = valid[exposed]
+        self.contact_nodes = self.node_map[tuple(rod_points[exposed].T)]
+        radius = v.jet_splash_radius
+        self.splash_offsets = np.asarray(sorted(
+            ((x,y,z) for x in range(-radius,radius+1) for y in range(-radius,radius+1)
+             for z in range(-radius,radius+1) if x*x+y*y+z*z<=radius*radius),
+            key=lambda p:sum(n*n for n in p)), dtype=int)
         self.beam = np.zeros_like(self.cells,dtype=bool)
         self.nozzle = np.array([v.width//2,round(v.height*.75),v.depth-3],dtype=int)
         self.aim = np.array([*self.nozzle],dtype=int)
         self.delta = np.zeros(3,dtype=int)
         self._aim_key = None
         self.last_step_ms = 0.
+        self.active_steps = self.idle_steps = 0
+        self.impact_commands = 0
+        self.impact_command_bytes = 0
 
     @property
     def packed_bytes(self):
@@ -171,15 +192,56 @@ class VoxelWorld:
         source[move],target[move] = EMPTY,WATER
 
     def contacts(self):
-        wet = self.cells==WATER
-        neighbor = np.zeros_like(wet)
-        for axis in range(3):
-            a,b = [slice(None)]*3,[slice(None)]*3
-            a[axis],b[axis]=slice(1,None),slice(None,-1)
-            neighbor[tuple(a)] |= wet[tuple(b)]
-            neighbor[tuple(b)] |= wet[tuple(a)]
-        nodes = self.node_map[neighbor & (self.node_map>=0)]
+        # Each rod voxel contributes ONCE if any of its six faces is wet, just
+        # like the original volume-wide implementation (not once per wet face).
+        wet = (self.cells.ravel()[self.contact_neighbors]==WATER) & self.contact_valid
+        nodes = self.contact_nodes[wet.any(axis=1)]
         return np.bincount(nodes,minlength=self.rules.count)
+
+    def deposit_impacts(self, payload):
+        """Host -> runoff engine boundary: ordered little-endian uint32 voxel IDs.
+
+        Flight/rendering stays on the host/GPU; only rounded last-free impact
+        voxels cross this boundary, not whole Q10 packet arrays. Returns packed
+        accepted bits in input order so rejected packets can rebound visually.
+        This is a CPU reference codec, NOT a PCIe driver or an FPGA bitstream.
+        """
+        if len(payload)%4:
+            raise ValueError("Impact command payload must contain uint32 voxel IDs")
+        ids = np.frombuffer(payload, dtype="<u4")
+        if np.any(ids >= self.cells.size):
+            raise ValueError("Impact voxel ID outside volume")
+        z,y,x = np.unravel_index(ids, self.cells.shape)
+        base = np.column_stack((x,y,z))
+        self.impact_commands += len(ids)
+        self.impact_command_bytes += len(payload)
+        flat = self.cells.ravel()
+        offsets = self.splash_offsets
+        points = base[:,None,:]+offsets[None,:,:]
+        bounds = np.array([self.cfg.width-1,self.cfg.height-1,self.cfg.depth-1])
+        valid = np.all((points>=1)&(points<bounds),axis=2)
+        for part in range(1,self.cfg.jet_splash_radius+1):
+            between=base[:,None,:]+np.rint(offsets[None,:,:]*part/self.cfg.jet_splash_radius).astype(int)
+            between=np.clip(between,[0,0,0],bounds)
+            valid &= ~self.solids[between[:,:,2],between[:,:,1],between[:,:,0]]
+        safe=np.clip(points,[0,0,0],bounds)
+        indices=(safe[:,:,2]*self.cfg.height+safe[:,:,1])*self.cfg.width+safe[:,:,0]
+        searching=np.any(valid & (flat[indices]==EMPTY),axis=1)
+        deposited=np.zeros(len(ids),bool)
+        for column in range(len(offsets)):
+            if not np.any(searching): break
+            candidates=np.flatnonzero(searching & valid[:,column] & (flat[indices[:,column]]==EMPTY))
+            targets=indices[candidates,column]
+            _,first=np.unique(targets,return_index=True)
+            placed=candidates[first]
+            flat[targets[first]]=WATER
+            self.injected+=len(placed)
+            deposited[placed]=True
+            searching[placed]=False
+            if column%8==7 and column+1<len(offsets):
+                remaining=np.flatnonzero(searching)
+                searching[remaining]=np.any(valid[remaining,column+1:] & (flat[indices[remaining,column+1:]]==EMPTY),axis=1)
+        return np.packbits(deposited,bitorder="little").tobytes()
 
     def step(self, spraying=False):
         start = time.perf_counter()
@@ -193,17 +255,22 @@ class VoxelWorld:
                     amount = abs(int(self.delta[xyz_axis]))
                     if (phase+1)*amount//length != phase*amount//length:
                         self._push_axis(axis,int(np.sign(self.delta[xyz_axis])),phase&1)
-        # Alternating vertical planes + block phases couples the whole volume.
-        plane_pass(self.cells,self.table,(1,2) if self.ticks%2==0 else (1,0),(self.ticks//2)&1)
-        # Stronger downward transport after impact; water should run down a
-        # rod, not spend most of its screen time hovering/spreading sideways.
-        for repeat in range(v.runoff_gravity_passes):
-            parity=(self.ticks+repeat)&1
-            a=self.cells[:,parity:v.height-1:2,:]
-            b=self.cells[:,parity+1:v.height:2,:]
-            sink=((a==WATER)&(b==EMPTY))|((a==DEBRIS)&((b==WATER)|(b==EMPTY)))
-            before=a[sink].copy()
-            a[sink],b[sink]=b[sink],before
+        # No material -> no useful automaton work. Still advance the SAME tick
+        # phases and scheduled debris RNG. This also benefits a fair CPU/GPU
+        # baseline; actual hardware clock gating remains future implementation.
+        active = np.any((self.cells==WATER)|(self.cells==DEBRIS))
+        self.active_steps += int(active)
+        self.idle_steps += int(not active)
+        if active:
+            # Alternating vertical planes + block phases couples the volume.
+            plane_pass(self.cells,self.table,(1,2) if self.ticks%2==0 else (1,0),(self.ticks//2)&1)
+            for repeat in range(v.runoff_gravity_passes):
+                parity=(self.ticks+repeat)&1
+                a=self.cells[:,parity:v.height-1:2,:]
+                b=self.cells[:,parity+1:v.height:2,:]
+                sink=((a==WATER)&(b==EMPTY))|((a==DEBRIS)&((b==WATER)|(b==EMPTY)))
+                before=a[sink].copy()
+                a[sink],b[sink]=b[sink],before
         self.ticks += 1
         if v.drain_every_steps and self.ticks%v.drain_every_steps==0:
             sump = self.cells[:,-2,:]
@@ -215,7 +282,7 @@ class VoxelWorld:
             if self.cells[z,2,x]==EMPTY:
                 self.cells[z,2,x] = DEBRIS
                 self.debris_added += 1
-        contacts = self.contacts()
+        contacts = self.contacts() if active else np.zeros(self.rules.count, dtype=np.int64)
         self.last_step_ms = (time.perf_counter()-start)*1000
         return contacts
 
@@ -279,10 +346,6 @@ class BallisticJet:
         self.rng=np.random.default_rng(self.cfg.seed ^ 0x6174)
         self.emitted=self.deposited=self.escaped=0
         self.last_hits=np.empty((0,3),float)
-        radius=self.cfg.jet_splash_radius
-        self.offsets=sorted(((x,y,z) for x in range(-radius,radius+1)
-                             for y in range(-radius,radius+1) for z in range(-radius,radius+1)
-                             if x*x+y*y+z*z<=radius*radius),key=lambda p:sum(n*n for n in p))
 
     def set_stream(self, origin, target):
         self.origin=np.asarray(origin,float).copy()
@@ -317,35 +380,11 @@ class BallisticJet:
     def _deposit(self, packet_ids, free_positions, alive):
         w=self.world
         base=np.rint(free_positions/self.Q).astype(int)
-        flat=w.cells.ravel()
-        points=base[:,None,:]+np.asarray(self.offsets)[None,:,:]
-        bounds=np.array([w.cfg.width-1,w.cfg.height-1,w.cfg.depth-1])
-        valid=np.all((points>=1)&(points<bounds),axis=2)
-        # A splash may spread around a surface, but cannot deposit through a
-        # thin wall merely because an empty cell is within the search radius.
-        for part in range(1,self.cfg.jet_splash_radius+1):
-            between=base[:,None,:]+np.rint(np.asarray(self.offsets)[None,:,:]*part/self.cfg.jet_splash_radius).astype(int)
-            between=np.clip(between,[0,0,0],bounds)
-            valid &= ~w.solids[between[:,:,2],between[:,:,1],between[:,:,0]]
-        safe=np.clip(points,[0,0,0],bounds)
-        indices=(safe[:,:,2]*w.cfg.height+safe[:,:,1])*w.cfg.width+safe[:,:,0]
-        searching=np.any(valid & (flat[indices]==EMPTY),axis=1)
-        deposited=np.zeros(len(packet_ids),bool)
-        for column in range(len(self.offsets)):
-            if not np.any(searching): break
-            candidates=np.flatnonzero(searching & valid[:,column] & (flat[indices[:,column]]==EMPTY))
-            targets=indices[candidates,column]
-            _,first=np.unique(targets,return_index=True)
-            placed=candidates[first]
-            flat[targets[first]]=WATER
-            alive[packet_ids[placed]]=False
-            self.deposited+=len(placed)
-            w.injected+=len(placed)
-            deposited[placed]=True
-            searching[placed]=False
-            if column%8==7 and column+1<len(self.offsets):
-                ids=np.flatnonzero(searching)
-                searching[ids]=np.any(valid[ids,column+1:] & (flat[indices[ids,column+1:]]==EMPTY),axis=1)
+        indices=(base[:,2]*w.cfg.height+base[:,1])*w.cfg.width+base[:,0]
+        accepted = w.deposit_impacts(indices.astype("<u4").tobytes())
+        deposited = np.unpackbits(np.frombuffer(accepted,np.uint8),bitorder="little")[:len(packet_ids)].astype(bool)
+        alive[packet_ids[deposited]]=False
+        self.deposited+=int(deposited.sum())
         remaining=np.flatnonzero(~deposited)
         if len(remaining):
             ids=packet_ids[remaining]

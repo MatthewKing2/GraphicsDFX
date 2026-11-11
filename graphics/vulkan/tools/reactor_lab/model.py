@@ -14,8 +14,9 @@ def random_next(x):
     return x
 
 
-def seed_streams(seed, shape):
-    x = np.arange(np.prod(shape), dtype=np.uint32).reshape(shape) + np.uint32(1)
+def seed_streams(seed, shape, start=0):
+    # Absolute stream IDs make micro-batches bit-identical to one large batch.
+    x = np.arange(start, start + np.prod(shape), dtype=np.uint32).reshape(shape) + np.uint32(1)
     x = x * np.uint32(0x9e3779b9) ^ np.uint32(seed & 0xffffffff)
     x ^= x >> np.uint32(16)
     x *= np.uint32(0x7feb352d)
@@ -30,6 +31,17 @@ class Forecast:
     trials: int
     seconds: float
     rod_probability: np.ndarray
+    rod_hits: np.ndarray
+    batch_trials: int
+    persistent_batch_bytes: int
+
+    def result_packet(self):
+        """Proposed device -> host ABI: uint32 trial count, uint16 hits per rod.
+
+        The panel needs rod-level unions, not every trial's full thermal world.
+        Framing/version IDs would be supplied by the eventual transport shell.
+        """
+        return np.asarray([self.trials], dtype="<u4").tobytes() + self.rod_hits.astype("<u2").tobytes()
 
 
 class Rules:
@@ -209,7 +221,7 @@ class Rules:
             valid[i, :len(chosen)] = True
         return neighbors, valid
 
-    def transition(self, heat, fault, rng, tick=0, sockets=None):
+    def transition(self, heat, fault, rng, tick=0, sockets=None, operating_rods=None):
         """Synchronous OLD -> NEXT, one world or [trials, cells]; no mutation."""
         cfg, q = self.cfg, self.rates
         rng = random_next(rng)
@@ -219,7 +231,9 @@ class Rules:
         influence = np.zeros_like(heat, dtype=np.int32)
         for k in range(self.neighbors.shape[1]):
             influence += hot[..., self.neighbors[:, k]] & self.neighbor_valid[:, k]
-        operating = np.repeat(self.operating_heat(tick, sockets), self.segments)
+        if operating_rods is None:
+            operating_rods = self.operating_heat(tick, sockets)
+        operating = np.repeat(operating_rods, self.segments)
         loaded = operating >= cfg.thermal.hot_heat
         ignition = (np.where(loaded, q["ignition_loaded_256"], q["ignition_quiet_256"]) +
                     q["ignition_per_hot_neighbor_256"] * influence + q["ignition_if_hot_256"] * hot)
@@ -238,7 +252,6 @@ class Rules:
         # One rare event per rod heats a contiguous patch, not 128 unrelated
         # independent triggers. Event location/occurrence vary between futures.
         rod_random = rng.reshape(*rng.shape[:-1], self.total_rods, self.segments)[...,0]
-        operating_rods = operating.reshape(self.total_rods,self.segments)[:,0]
         chance = np.where(operating_rods >= cfg.thermal.hot_heat,q["hotspot_loaded_256"],q["hotspot_quiet_256"])
         event = (rod_random & 255) < chance
         center = ((rod_random >> 8) % self.segments)[...,None]
@@ -254,17 +267,36 @@ class Rules:
         # Routing is a snapshot, fixed throughout each hypothetical future.
         sockets = self.initial_sockets() if sockets is None else np.asarray(sockets).copy()
         trials = self.cfg.forecast.trials if trials is None else trials
-        h = np.broadcast_to(heat, (trials, self.count)).copy()
-        f = np.broadcast_to(fault, h.shape).copy()
-        rng = seed_streams(self.cfg.forecast.seed, h.shape)
-        failed = h >= self.cfg.thermal.critical_heat
+        if not 1 <= trials <= 8192:
+            raise ValueError("Forecast trials must be in [1,8192]")
+        # The shared load trajectory depends on routing/time, not trial RNG.
+        # Compile it ONCE on the host; the device kernel needs no GW divisions.
+        schedule = np.empty((self.steps,self.total_rods), dtype=np.uint8)
         for offset in range(self.steps):
             if cancel is not None and cancel.is_set():
                 return None
-            h, f, rng = self.transition(h, f, rng, tick + offset, sockets)
-            failed |= h >= self.cfg.thermal.critical_heat
-        rod_failed = failed.reshape(trials, self.total_rods, self.segments).any(axis=-1)
-        return Forecast(failed.mean(axis=0), trials, self.horizon, rod_failed.mean(axis=0))
+            schedule[offset] = self.operating_heat(tick + offset, sockets)
+        cell_hits = np.zeros(self.count, np.uint32)
+        rod_hits = np.zeros(self.total_rods, np.uint16)
+        batch_trials = min(trials, self.cfg.forecast.trial_batch_size)
+        for first in range(0, trials, batch_trials):
+            size = min(batch_trials, trials-first)
+            h = np.broadcast_to(heat, (size, self.count)).copy()
+            f = np.broadcast_to(fault, h.shape).copy()
+            rng = seed_streams(self.cfg.forecast.seed, h.shape, first*self.count)
+            failed = h >= self.cfg.thermal.critical_heat
+            for offset, operating in enumerate(schedule):
+                if cancel is not None and cancel.is_set():
+                    return None
+                h, f, rng = self.transition(h, f, rng, tick + offset, sockets, operating)
+                failed |= h >= self.cfg.thermal.critical_heat
+            cell_hits += failed.sum(axis=0, dtype=np.uint32)
+            rod_hits += failed.reshape(size, self.total_rods, self.segments).any(axis=-1).sum(axis=0, dtype=np.uint16)
+        # Persistent h/f/RNG/failure state ONLY; excludes scratch, routing,
+        # schedules, reduction counters, shell, and any extra hardware buffers.
+        persistent = batch_trials*self.count*(1+1+4+1)
+        return Forecast(cell_hits/trials, trials, self.horizon, rod_hits/trials,
+                        rod_hits, batch_trials, persistent)
 
     def risk_color(self, probability):
         return next(color for lower, color in reversed(self.cfg.ui.risk_bands) if probability >= lower)

@@ -52,6 +52,52 @@ class RuleTests(unittest.TestCase):
 
 
 class WorldTests(unittest.TestCase):
+    def test_surface_contact_gather_equals_original_volume_scan(self):
+        w = VoxelWorld(small_rules())
+        rng = np.random.default_rng(311)
+        for density in (0., .01, .25, 1.):
+            w.cells[~w.solids] = np.where(rng.random(np.count_nonzero(~w.solids))<density,WATER,EMPTY)
+            wet = w.cells==WATER
+            neighbor = np.zeros_like(wet)
+            for axis in range(3):
+                a,b = [slice(None)]*3,[slice(None)]*3
+                a[axis],b[axis]=slice(1,None),slice(None,-1)
+                neighbor[tuple(a)] |= wet[tuple(b)]
+                neighbor[tuple(b)] |= wet[tuple(a)]
+            expected = np.bincount(w.node_map[neighbor & (w.node_map>=0)],minlength=w.rules.count)
+            np.testing.assert_array_equal(w.contacts(),expected)
+
+    def test_idle_skips_preserve_tick_phase_and_debris_rng(self):
+        w = VoxelWorld(small_rules({"voxel":{"debris_every_steps":7}}))
+        rng = np.random.default_rng(w.cfg.seed)
+        expected_x,expected_z = int(rng.integers(1,w.cfg.width-1)),int(rng.integers(1,w.cfg.depth-1))
+        before = w.cells.copy()
+        with patch("voxel.plane_pass",wraps=plane_pass) as core:
+            for _ in range(7):
+                np.testing.assert_array_equal(w.step(),np.zeros(w.rules.count))
+            self.assertEqual(core.call_count,0)
+            self.assertEqual(w.idle_steps,7)
+            self.assertEqual(w.active_steps,0)
+            before[expected_z,2,expected_x]=DEBRIS
+            np.testing.assert_array_equal(w.cells,before)
+            w.step()
+            self.assertEqual(core.call_count,1)
+            self.assertEqual(core.call_args.args[2:],((1,0),1))  # unchanged tick=7 phase
+
+    def test_impact_wire_contract_is_ordered_compact_and_mass_conserving(self):
+        w = VoxelWorld(small_rules())
+        empty = np.flatnonzero(w.cells.ravel()==EMPTY)
+        ids = np.repeat(empty[len(empty)//2],19).astype("<u4")
+        reply = w.deposit_impacts(ids.tobytes())
+        accepted = np.unpackbits(np.frombuffer(reply,np.uint8),bitorder="little")[:len(ids)]
+        self.assertEqual(len(reply),3)
+        self.assertEqual(w.impact_command_bytes,19*4)
+        self.assertEqual(w.injected,int(accepted.sum()))
+        self.assertEqual(np.count_nonzero(w.cells==WATER),w.injected)
+        np.testing.assert_array_equal(w.cells==WALL,w.solids)
+        with self.assertRaises(ValueError): w.deposit_impacts(b"bad")
+        with self.assertRaises(ValueError): w.deposit_impacts(np.asarray([w.cells.size],"<u4").tobytes())
+
     def test_default_packed_volume_under_old_world_payload_and_link_budget(self):
         world=VoxelWorld(Rules())
         self.assertEqual(world.packed_bytes,36864)
@@ -336,6 +382,12 @@ def benchmark(rules):
         "reactor_forecast_calls":0,"reactor_thermal_ticks":s.reactor.ticks,
         "in_flight_packets":len(s.jet.positions),
         "jet_state_host_bytes":s.jet.positions.nbytes+s.jet.velocities.nbytes+s.jet.age.nbytes+s.jet.entered.nbytes,
+        "offload_boundary":"Proposed CPU/GPU: visual Q10 flight; FPGA: impact deposition + 2-bit runoff + wet contacts. All currently CPU.",
+        "impact_request_bytes_per_simulation_second":round(s.world.impact_command_bytes/s.world.ticks*rules.cfg.voxel.steps_per_second,1),
+        "impact_commands":s.world.impact_commands,
+        "idle_core_steps":s.world.idle_steps,
+        "active_core_steps":s.world.active_steps,
+        "surface_contact_voxels":len(s.world.contact_nodes),
         "upstream":"XY/ZY cell-table extension for runoff; NEW Q10 velocity packets before impact",
         "power_status":"No LiteFury whole-board measurement or GPU baseline for this new 3D kernel"
     }
