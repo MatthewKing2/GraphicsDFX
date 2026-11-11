@@ -1,4 +1,4 @@
-"""Standalone 3D voxel coolant demo. CPU/NumPy simulation + software 3D view.
+"""3D-view coolant demo: ballistic jet + cylindrical lattice-gas surface films.
 
 Run: python graphics/vulkan/tools/reactor_lab/spray3d.py
 Mouse: move the nozzle; hold left to spray toward the aim marker above it.
@@ -146,6 +146,19 @@ def scene(session,camera,width,height):
             size=max(1.,min(12.,min(width,height)*1.05*v.water_render_scale/d))
             color=u.foam_color if w.cells[tuple(position)]==WATER else u.debris_color
             primitives.append((float(d),"particle",[point[0]-size/2,point[1]-size/2,point[0]+size/2,point[1]+size/2],color,1))
+    film_count = 0
+    if hasattr(w,"film"):
+        available = max(0,v.max_drawn_particles-len(coords))
+        drips = w.drips[:min(len(w.drips),available),:3]
+        xyz = w.film.samples(available-len(drips))
+        xyz = np.concatenate((xyz,drips))
+        film_count = len(xyz)
+        if film_count:
+            xy,depth = camera.project(xyz,width,height)
+            for point,d in zip(xy,depth):
+                if d<=0: continue
+                size=max(1.,min(12.,min(width,height)*1.05*v.water_render_scale/d))
+                primitives.append((float(d),"particle",[point[0]-size/2,point[1]-size/2,point[0]+size/2,point[1]+size/2],u.foam_color,1))
     jet=session.jet
     if len(jet.positions):
         indices=np.linspace(0,len(jet.positions)-1,min(v.max_drawn_jet_particles,len(jet.positions)),dtype=int)
@@ -169,7 +182,7 @@ def scene(session,camera,width,height):
         offset+=count
         if np.all(depth>0):
             primitives.append((float(depth.mean()) if override is None else override,kind,xy.ravel().tolist(),color,size))
-    return sorted(primitives,key=lambda item:item[0],reverse=True),len(coords)
+    return sorted(primitives,key=lambda item:item[0],reverse=True),len(coords)+film_count
 
 
 def rasterize(primitives,width,height,background,water_opacity,jet_opacity):
@@ -202,7 +215,7 @@ class SprayApp:
     def __init__(self,root,rules,chamber=0,rod=1):
         self.root,self.rules,self.chamber,self.rod=root,rules,chamber,rod
         u=rules.cfg.ui
-        root.title("COOLANT / 3D | voxel particle prototype")
+        root.title("COOLANT / 3D | "+("lattice-gas surface film" if rules.cfg.lattice.enabled else "legacy voxel runoff"))
         root.geometry(f"{min(1400,root.winfo_screenwidth()-70)}x{min(900,root.winfo_screenheight()-100)}+20+30")
         root.configure(bg=u.background_color)
         top=tk.Frame(root,bg=u.background_color)
@@ -367,11 +380,13 @@ class SprayApp:
             f"Safe target: <= {r.cfg.thermal.safe_heat}\nWet contact: {p.contact_seconds:.1f}/{r.cfg.timing.treatment_seconds:g}s\n"
             f"Repair fuse: {p.remaining:.0f}s\n\n"
             "Mouse: move hose outlet\nHold left: high-pressure jet\nAim marker ABOVE the nozzle\nRight drag: orbit in 3D\nWheel: zoom\n1..9: select another target\n\n"
-            f"WORLD: {w.cfg.width}x{w.cfg.height}x{w.cfg.depth}\n{np.count_nonzero(w.cells==WATER):,} coolant voxels\n"
-            f"Grid only: {w.packed_bytes/1024:.1f} KiB\nImpact command: 4 bytes + reply bit\n"
+            f"WORLD: {w.cfg.width}x{w.cfg.height}x{w.cfg.depth}\n"
+            +(f"FILM: {s.rules.cfg.lattice.film_rows} x {s.rules.cfg.lattice.film_columns} / rod\n{w.water_particles:,} moving fluid bits\n" if hasattr(w,"film") else f"{np.count_nonzero(w.cells==WATER):,} coolant voxels\n")+
+            f"Fluid snapshot: {w.packed_bytes/1024:.1f} KiB\nImpact command: 4 bytes + reply bit\n"
             f"In-flight packets: {len(s.jet.positions):,}\nJet speed: {w.cfg.jet_speed_voxels_per_second:g} voxels/s\n"
             f"Physics step: {s.simulation_ms:.2f} ms\nSoftware draw: {self.render_ms:.2f} ms\nDrawing {drawn:,} surface samples\n\n"
-            "CPU/NumPy prototype.\nNo GPU/FPGA power claim.\nNo thermal forecast runs here.\nOffload plan: flight stays host.\nFPGA: impacts / runoff / contacts."
+            "CPU/NumPy prototype.\nNo GPU/FPGA power claim.\nNo neutron forecast runs here.\nFlight / decorative drips: host.\n"
+            +("After impact: 2D films on 3D rods." if hasattr(w,"film") else "After impact: legacy voxel runoff.")
             +( "\nPAUSED" if self.paused else ""))
         self.dirty=False
 

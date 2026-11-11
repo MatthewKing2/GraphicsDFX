@@ -223,6 +223,40 @@ class Rules:
 
     def transition(self, heat, fault, rng, tick=0, sockets=None, operating_rods=None):
         """Synchronous OLD -> NEXT, one world or [trials, cells]; no mutation."""
+        if self.cfg.neutron.enabled:
+            return self.neutron_transition(heat,fault,rng,tick,sockets,operating_rods)
+        return self.legacy_transition(heat,fault,rng,tick,sockets,operating_rods)
+
+    def neutron_transition(self, heat, fault, rng, tick=0, sockets=None, operating_rods=None):
+        """Fission heat + axial diffusion + cooling + the existing runaway fuse.
+
+        This same bounded transport kernel runs live and in every forecast.
+        Source/load feedback is a fictional game control law, not nuclear data.
+        No forecast percentage feeds back into the physical simulation.
+        """
+        from neutron import sample
+        cfg,q = self.cfg,self.rates
+        rng = random_next(rng)
+        heat = self.diffuse(heat,rng,tick)
+        if operating_rods is None:
+            operating_rods = self.operating_heat(tick,sockets)
+        operating = np.repeat(operating_rods,self.segments)
+        counts,_ = sample(self,heat,rng,operating_rods)
+        loaded = operating>=cfg.thermal.hot_heat
+        runaway = ((fault&2)!=0)|(heat>=cfg.thermal.surge_heat)
+        background = (heat<operating)&(((rng>>16)&255)<q["background_reheating_256"])
+        rising = runaway&(((rng>>8)&255)<q["runaway_heating_256"])
+        falling = (heat>operating)&~runaway&(((rng>>24)&255)<
+                    np.where(loaded,q["cooling_loaded_256"],q["cooling_quiet_256"]))
+        energy = round(cfg.neutron.heat_per_fission*cfg.tuning.heating_scale)
+        h = np.clip(heat.astype(np.int32)+counts.astype(np.int32)*energy+
+                    (background.astype(np.int32)+rising)*cfg.thermal.heat_step-
+                    falling*cfg.thermal.cool_step,0,cfg.thermal.critical_heat).astype(np.uint8)
+        runaway |= h>=cfg.thermal.surge_heat
+        return h,(counts>0).astype(np.uint8)|(runaway.astype(np.uint8)<<1),rng
+
+    def legacy_transition(self, heat, fault, rng, tick=0, sockets=None, operating_rods=None):
+        """Original random-event model, retained for comparison/regressions."""
         cfg, q = self.cfg, self.rates
         rng = random_next(rng)
         # bit 0 = stochastic fault; bit 1 = latched nuclear runaway.
@@ -467,6 +501,11 @@ class Foam:
                 b = y0 + (s + 1) * (y1 - y0) // rules.segments
                 self.rod_map[a:b, x0:x1] = rules.node(chamber, r, s)
         self.yy, self.xx = np.ogrid[:self.height, :self.width]
+        self.gas = None
+        if rules.cfg.lattice.enabled:
+            from lattice import LatticeGas
+            self.gas = LatticeGas(self.cells.shape,self.cells==3,seed=cfg.foam.seed,
+                                  gravity=cfg.lattice.gravity_256)
 
     def inject(self, x, y):
         # Aiming into a solid rod deposits on its nearest surface, rather than
@@ -479,6 +518,8 @@ class Foam:
             x = x0-1 if x-x0 < x1-x else x1
         radius = self.rules.cfg.foam.spray_radius_cells
         spray = ((self.xx - x) ** 2 + (self.yy - y) ** 2 <= radius ** 2) & (self.cells == 0)
+        if self.gas is not None:
+            self.gas.inject_mask(spray)
         self.cells[spray] = 1
 
     def _move(self, dx, dy, eligible):
@@ -496,6 +537,12 @@ class Foam:
     def step(self):
         self.ticks += 1
         q = self.rules.cfg.foam
+        if self.gas is not None:
+            debris = self.cells==2
+            for _ in range(self.rules.cfg.lattice.steps_per_tick):
+                self.gas.step()
+            self.cells = np.where(self.gas.solids,3,np.where(self.gas.channels!=0,1,0)).astype(np.uint8)
+            self.cells[debris&~self.gas.solids&(self.cells==0)] = 2
         foam = self.cells == 1
         adjacent = np.zeros_like(foam)
         adjacent[1:] |= foam[:-1]
@@ -503,6 +550,14 @@ class Foam:
         adjacent[:, 1:] |= foam[:, :-1]
         adjacent[:, :-1] |= foam[:, 1:]
         contacts = np.bincount(self.rod_map[adjacent & (self.rod_map >= 0)], minlength=self.rules.count)
+        if self.gas is not None:
+            # Debris is cosmetic in this 2D preview; the FHP channels own water.
+            self._move(0,1,self.cells==2)
+            if q.debris_every_steps and self.ticks%q.debris_every_steps==0:
+                x=int(self.rng.integers(self.width))
+                if self.cells[0,x]==0:
+                    self.cells[0,x]=2
+            return contacts
         if q.gravity_every_steps and self.ticks % q.gravity_every_steps == 0:
             self._move(0, 1, (self.cells == 1) | (self.cells == 2))
         direction = 1 if self.rng.integers(2) else -1

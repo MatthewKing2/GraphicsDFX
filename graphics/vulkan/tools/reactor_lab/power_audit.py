@@ -3,7 +3,7 @@
 Run from Git Bash: python graphics/vulkan/tools/reactor_lab/power_audit.py
 No Jetson/FPGA, PCIe transfer, DFX operation, or optimized GPU baseline is run.
 Compare the eventual best CPU/GPU variant, NOT deliberately tiny CPU batches.
-Gameplay, forecast trials, random streams, and spray volume are unchanged.
+The audit does not change gameplay settings, trial counts or spray volume.
 
 Whole-system break-even at identical FPS/quality/prediction deadlines:
     saved Jetson watts > added FPGA-board + link watts + DFX joules/interval.
@@ -21,7 +21,7 @@ import time
 import numpy as np
 from config import DEFAULT_PATH, load_config
 from model import Rules, Reactor
-from voxel import VoxelWorld
+from voxel import VoxelWorld,SurfaceWorld
 
 
 def reactor_audit(cfg, repeats, device_batch_size=8):
@@ -43,13 +43,16 @@ def reactor_audit(cfg, repeats, device_batch_size=8):
         samples.append({
             "batch_trials":size,"median_cpu_reference_ms":round(statistics.median(timings),3),
             "persistent_trial_state_bytes":result.persistent_batch_bytes,
-            "state_exclusions":"scratch, schedules, reduction counters, topology, shell, extra hardware buffers",
+            "state_exclusions":"temporary neutron histories, scratch, schedules, reduction counters, topology, shell, extra hardware buffers",
         })
     return {
         "cells":rules.count,"rods":rules.total_rods,"trials":result.trials,"steps_per_future":rules.steps,
         "total_cell_updates_per_forecast":rules.count*result.trials*rules.steps,
         "refresh_seconds":cfg.forecast.refresh_seconds,
         "state_per_cell":"uint8 heat + uint8 fault + uint32 RNG + bool ever-failed (7 host bytes)",
+        "thermal_model":"bounded neutron transport + fission heat + diffusion/runaway" if cfg.neutron.enabled else "legacy random thermal events",
+        "neutron_sources_per_future_step":rules.total_rods*cfg.neutron.walkers_per_rod if cfg.neutron.enabled else 0,
+        "neutron_generations":cfg.neutron.generations if cfg.neutron.enabled else 0,
         "exact_results_equal_across_batch_sizes":True,
         "batch_comparison":samples,
         "rod_result_payload_bytes_excluding_transport_framing":len(result.result_packet()),
@@ -65,13 +68,14 @@ def audit(cfg, repeats, device_batch_size=8):
     particles = json.loads(captured.getvalue())
     # Isolate the idle path without changing game defaults or spawning debris.
     idle_rules = Rules(load_config(overrides={**cfg.source,"voxel":{**cfg.source["voxel"],"debris_every_steps":0}}))
-    idle = VoxelWorld(idle_rules)
+    idle = (SurfaceWorld if cfg.lattice.enabled else VoxelWorld)(idle_rules)
     start = time.perf_counter()
     for _ in range(240):
         idle.step()
     particles["isolated_empty_core_mean_ms"] = round((time.perf_counter()-start)*1000/240,3)
     particles["idle_test_note"] = "Only this isolated empty-core timing disables debris; game defaults unchanged."
-    particles["wire_note"] = "Impact request/accept-bit codecs run in reference; snapshot pack codec tested. No real transfers. Flight arrays stay host-side."
+    particles["wire_note"] = ("Impact request/accept-bit codecs run in reference; no real transfers. Flight arrays stay host-side. "
+                              +("Film snapshot: one byte/site, six moving bits." if cfg.lattice.enabled else "Legacy voxel snapshot: two bits/site."))
     return {
         "measurement":"Laptop CPU reference timings only; milliseconds are not watts.",
         "reactor":reactor_audit(cfg,repeats,device_batch_size),"particles":particles,
@@ -81,7 +85,7 @@ def audit(cfg, repeats, device_batch_size=8):
         "fair_test":"Same rendering/FPS, output accuracy and deadline; same idle and batching optimizations allowed on CPU/GPU. Include real duty cycles.",
         "hardware_risks":[
             "Small useful workloads can save less than the added board/link idle power.",
-            "3D runoff and impact deposition are not the measured upstream 2D FPGA kernel.",
+            "Cylindrical films, source/drain/forcing and this neutron model are not the measured upstream FPGA kernels.",
             "Random topology reads, RNG state, scratch/double buffers, routing and timing still need synthesis.",
             "Phase exclusivity is software-tested; no runtime DFX integration or energy measurement yet.",
         ],

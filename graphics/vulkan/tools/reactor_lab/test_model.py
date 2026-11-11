@@ -220,7 +220,7 @@ class ThermalTests(unittest.TestCase):
         self.assertTrue(np.all(h <= r.cfg.thermal.critical_heat))
 
     def test_hotter_bank_means_more_heat(self):
-        changes = {"thermal": {"diffusion_passes": 0, "heating_256": 0, "surge_heating_256": 0,
+        changes = {"neutron":{"enabled":False}, "thermal": {"diffusion_passes": 0, "heating_256": 0, "surge_heating_256": 0,
                                 "ignition_loaded_256": 0, "ignition_quiet_256": 0,
                                 "ignition_if_hot_256": 0, "background_reheating_256": 256,
                                 "cooling_quiet_256": 256, "cooling_loaded_256": 256},
@@ -233,6 +233,7 @@ class ThermalTests(unittest.TestCase):
         w.step()
         self.assertTrue(np.all(w.heat > before))
         cool = rules_for(merge(load_config().data, {"power": {"demand_min": 0, "demand_max": 0},
+              "neutron":{"enabled":False},
               "thermal": changes["thermal"], "layout": {"reactors":2,"rods_per_reactor":3,"cells_per_rod":16},
               "forecast": {"trials":8,"horizon_seconds":4.0}}))
         h, _, _ = cool.transition(before, np.zeros_like(before), w.rng, 0)
@@ -324,7 +325,7 @@ class ThermalTests(unittest.TestCase):
         # intermediate percentage merely to satisfy a visual expectation.
         np.testing.assert_allclose(p.rod_probability*p.trials,np.rint(p.rod_probability*p.trials))
         # A disabled event cannot inject a new hot spot.
-        off=rules_for({"thermal":{"hotspot_loaded_256":0,"hotspot_quiet_256":0,
+        off=rules_for({"neutron":{"enabled":False},"thermal":{"hotspot_loaded_256":0,"hotspot_quiet_256":0,
                 "diffusion_passes":0,"heating_256":0,"background_reheating_256":0,
                 "surge_heating_256":0,"runaway_heating_256":0}})
         world=Reactor(off)

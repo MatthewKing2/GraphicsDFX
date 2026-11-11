@@ -3,7 +3,8 @@
 # Every preset extends THIS file. R resets the current settings/seed.
 # Rates ending in _256 are chances out of 256: 0=never, 128=50%, 256=always.
 # Forecast percentages are computed, never forced by these color/pacing knobs.
-# Quick knobs: [layout], [power] counts/loads, [thermal] diffusion/runaway,
+# Quick knobs: [neutron] source/reaction rates, [lattice] film flow/resolution,
+# [layout], [power] counts/loads, [thermal] diffusion/runaway,
 # [timing] travel/treatment, [cooling] foam strength/reach, [forecast] work/accuracy.
 # SETTINGS -> Apply temporarily lets you try changes before saving.
 # Numeric fields also accept formulas as strings starting with '='.
@@ -70,6 +71,9 @@ diffusion_256 = 96
 diffusion_passes = 2
 heat_step = 1
 cool_step = 1
+# Ignition/fault/heating/hotspot rates below are for the LEGACY thermal model.
+# The neutron backend instead uses [neutron] for fission-driven heat.
+# Diffusion, runaway, background reheating and cooling still apply to both.
 ignition_loaded_256 = 5
 ignition_quiet_256 = 1
 ignition_per_hot_neighbor_256 = 4
@@ -92,11 +96,45 @@ cooling_quiet_256 = 64
 extra_quiet_cooling_256 = 16
 
 [connections]
-# Optional extra fault coupling. Axial heat diffusion is always local to a rod.
+# Legacy thermal backend only. Neutron transport now couples fuel regions.
 # 0 disables extra graph coupling; diffusion is controlled above.
 mode = "local"
 neighbors_per_cell = 0
 seed = 2026
+
+[neutron]
+# CPU reference of a bounded integer random-walk engine, not real reactor physics.
+# Disable to compare with the old random thermal-event model.
+enabled = true
+walkers_per_rod = "= max(1, round(layout.cells_per_rod / 16))"
+max_steps = 24
+generations = 2 # fission ends a walk and starts two children, up to this bound
+rod_pitch = 4 # hidden 2D map: fuel strip, then moderator gap
+fuel_width = 2
+fuel_absorb_256 = 12
+moderator_absorb_256 = 3
+fission_base_256 = 6
+fission_load_256 = 18 # increases with the rod's requested operating temperature
+hot_feedback_256 = 1 # extra fission chance per heat unit above hot_heat
+hot_source_256 = 64 # fraction of sources near a rod's hottest patch
+source_width_fraction = 0.08
+heat_per_fission = 2
+seed = 1741
+
+[lattice]
+# Six moving-direction bits per site. The 3D preview wraps a 2D film around
+# each cylinder; this is NOT a new full-volume 3D lattice-gas FPGA design.
+# Disable to compare with the old 3D falling-cell runoff / 2D foam.
+enabled = true
+film_rows = 64
+film_columns = 32 # circumference, periodic seam
+steps_per_tick = 2
+gravity_256 = 96 # external downward forcing; collisions themselves conserve momentum
+splash_radius = 2 # surface-space injection search, never jumps to another rod
+max_drawn_drips = 96 # display-only samples of water that has left the film
+drip_lifetime_seconds = 0.6
+drip_speed = 16.0 # world units / second, decorative drain samples only
+seed = 5219
 
 [cooling]
 # INCLUDING the touched cell: 16 means it cools 15 other cells too.
@@ -140,8 +178,8 @@ flow_every_steps = 1
 debris_every_steps = 12 # 0 disables debris
 seed = 19
 
-# Standalone TRUE 3D cell demo: python .../reactor_lab/spray3d.py
-# The existing panel/2D room stays unchanged. This is a proposed accelerator,
+# Standalone 3D-view coolant demo: python .../reactor_lab/spray3d.py
+# The current backend uses lattice-gas surface films after impact. Proposed accelerator,
 # not an FPGA implementation or physically accurate water/foam solver.
 [voxel]
 width = 48
@@ -155,7 +193,7 @@ rod_columns = 3
 nozzle_radius = 1
 jet_radius = 2
 jet_push_passes = 3
-# New hybrid spray: a fast fixed-point jet in flight, voxel fluid AFTER impact.
+# Fast fixed-point jet in flight; surface lattice gas AFTER rod impact.
 jet_particles_per_step = 96
 jet_max_particles = 4096
 jet_speed_voxels_per_second = 150.0
@@ -163,7 +201,7 @@ jet_gravity_voxels_per_second2 = 18.0
 jet_spread_degrees = 4.0
 jet_splash_radius = 3
 jet_max_lifetime_seconds = 1.5
-runoff_gravity_passes = 4 # heavier downward runoff instead of hovering spray
+runoff_gravity_passes = 4 # legacy voxel backend only; films use lattice.gravity_256
 # Mouse is the nozzle outlet; the aim marker is this far above it on screen.
 nozzle_aim_offset_pixels = 110.0
 # Display only: smaller translucent samples; the simulated water volume is unchanged.

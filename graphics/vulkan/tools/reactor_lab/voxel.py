@@ -1,6 +1,11 @@
-"""True 3D, 2-bit occupancy prototype using the upstream sand rule verbatim.
+"""Coolant references: lattice-gas surface films (default) and legacy 3D cells.
 
-Coordinates are [z, y, x], with +y down. Each step applies the original 2x2
+SurfaceWorld keeps 3D collision geometry and a Q10 flying jet, but after impact
+fluid occupies six directional bits/site on 2D cylindrical films. It is not
+unrestricted 3D water or the existing FPGA engine. VoxelWorld below retains
+the older full-volume falling-cell reference for comparisons and provenance.
+
+Legacy coordinates are [z, y, x], with +y down. Each step applies the original 2x2
 rule to either XY or ZY planes; successive steps exchange material in BOTH
 horizontal directions. This is NOT independent stacked 2D simulations.
 
@@ -198,6 +203,9 @@ class VoxelWorld:
         nodes = self.contact_nodes[wet.any(axis=1)]
         return np.bincount(nodes,minlength=self.rules.count)
 
+    def encode_impacts(self, xyz):
+        return ((xyz[:,2]*self.cfg.height+xyz[:,1])*self.cfg.width+xyz[:,0]).astype("<u4").tobytes()
+
     def deposit_impacts(self, payload):
         """Host -> runoff engine boundary: ordered little-endian uint32 voxel IDs.
 
@@ -287,6 +295,80 @@ class VoxelWorld:
         return contacts
 
 
+class SurfaceWorld(VoxelWorld):
+    """3D solid geometry and visual jet, but 2D cylindrical FHP runoff films.
+
+    The old volume remains geometry/debris only, NOT a hidden water solver.
+    Current reference uses NumPy throughout; no actual device transfer occurs.
+    """
+    def __init__(self,rules,chamber=0):
+        super().__init__(rules,chamber)
+        from lattice import SurfaceFilm
+        self.film = SurfaceFilm(self)
+        self.drips = np.empty((0,4),float) # xyz + age; ALREADY counted as drained
+
+    @property
+    def packed_bytes(self):
+        # One byte holds all six channels. Geometry/host flight are separate.
+        return self.film.gas.channels.nbytes
+
+    @property
+    def water_particles(self):
+        return self.film.particle_count
+
+    def encode_impacts(self,xyz):
+        return self.film.addresses(xyz).tobytes()
+
+    def deposit_impacts(self,payload):
+        accepted = self.film.deposit(payload)
+        self.impact_commands += len(payload)//4
+        self.impact_command_bytes += len(payload)
+        self.injected = self.film.gas.injected
+        return accepted
+
+    def contacts(self):
+        return self.film.contacts()
+
+    def step(self,spraying=False):
+        if spraying:
+            raise ValueError("Surface film must be fed by swept jet impacts, not a voxel pressure source")
+        started = time.perf_counter()
+        active = bool(np.any(self.film.gas.channels))
+        self.active_steps += int(active)
+        self.idle_steps += int(not active)
+        contacts = self.film.step() if active else np.zeros(self.rules.count,np.uint32)
+        self.drained = self.film.gas.drained
+        q = self.rules.cfg.lattice
+        dt = 1/self.cfg.steps_per_second
+        self.drips[:,1] += q.drip_speed*dt
+        self.drips[:,3] += dt
+        self.drips = self.drips[(self.drips[:,3]<q.drip_lifetime_seconds)&(self.drips[:,1]<self.cfg.height-1)]
+        if active and q.max_drawn_drips:
+            exits = np.argwhere(self.film.drain_sites!=0)
+            if len(exits):
+                rod,column = exits.T
+                centers = np.asarray(self.centers)[rod]
+                angle = (column+.5)*math.tau/q.film_columns
+                drops = np.column_stack((centers[:,0]+(self.cfg.rod_radius+.18)*np.cos(angle),
+                                         np.full(len(rod),self.y1),
+                                         centers[:,1]+(self.cfg.rod_radius+.18)*np.sin(angle),np.zeros(len(rod))))
+                self.drips = np.concatenate((self.drips,drops))[-q.max_drawn_drips:]
+        # Sparse falling debris is host-side presentation, outside the film
+        # accelerator boundary. No old falling-water/pressure solver runs here.
+        for z,y,x in np.argwhere(self.cells==DEBRIS)[::-1]:
+            if self.cells[z,y+1,x]==EMPTY:
+                self.cells[z,y,x],self.cells[z,y+1,x] = EMPTY,DEBRIS
+        self.ticks += 1
+        v = self.cfg
+        if v.debris_every_steps and self.ticks%v.debris_every_steps==0:
+            x,z = int(self.rng.integers(1,v.width-1)),int(self.rng.integers(1,v.depth-1))
+            if self.cells[z,2,x]==EMPTY:
+                self.cells[z,2,x] = DEBRIS
+                self.debris_added += 1
+        self.last_step_ms = (time.perf_counter()-started)*1000
+        return contacts
+
+
 class SpraySession:
     """Particle phase only: NEVER step or forecast reactor thermal dynamics."""
     def __init__(self, rules=None, chamber=0, rod=1, reactor=None):
@@ -294,7 +376,8 @@ class SpraySession:
         if not 0 <= chamber < self.rules.chambers or not 0 <= rod < self.rules.rods:
             raise ValueError("Chamber/rod outside configured layout (CLI uses 1-based numbers)")
         self.reactor = reactor or Reactor(self.rules)
-        self.world = VoxelWorld(self.rules,chamber)
+        world_type = SurfaceWorld if self.rules.cfg.lattice.enabled else VoxelWorld
+        self.world = world_type(self.rules,chamber)
         self.jet = BallisticJet(self.world)
         self.select(rod)
         self.simulation_ms = 0.
@@ -313,8 +396,8 @@ class SpraySession:
         start = time.perf_counter()
         self.repair.advance(1/self.world.cfg.steps_per_second)
         self.jet.step(spraying)
-        # Before impact: directed fixed-point flight. AFTER impact: local
-        # upstream voxel rules only; no pressure corridor tugging runoff around.
+        # Before impact: directed Q10 flight. Afterwards: surface lattice gas
+        # (default), or the selectable legacy voxel solver. Never both.
         contacts = self.world.step(False)
         if spraying or self.world.cfg.cool_residual_water:
             self.repair.cool(contacts)
@@ -380,8 +463,7 @@ class BallisticJet:
     def _deposit(self, packet_ids, free_positions, alive):
         w=self.world
         base=np.rint(free_positions/self.Q).astype(int)
-        indices=(base[:,2]*w.cfg.height+base[:,1])*w.cfg.width+base[:,0]
-        accepted = w.deposit_impacts(indices.astype("<u4").tobytes())
+        accepted = w.deposit_impacts(w.encode_impacts(base))
         deposited = np.unpackbits(np.frombuffer(accepted,np.uint8),bitorder="little")[:len(packet_ids)].astype(bool)
         alive[packet_ids[deposited]]=False
         self.deposited+=int(deposited.sum())

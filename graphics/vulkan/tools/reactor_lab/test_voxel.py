@@ -149,10 +149,11 @@ class WorldTests(unittest.TestCase):
         self.assertGreater(touched,0)
         self.assertGreater(s.repair.contact_seconds,0)
         self.assertLessEqual(s.repair.contact_seconds,180/w.cfg.steps_per_second)
-        self.assertEqual(np.count_nonzero(w.cells==WATER)+w.drained,w.injected)
+        particles = w.water_particles if hasattr(w,"film") else np.count_nonzero(w.cells==WATER)
+        self.assertEqual(particles+w.drained,w.injected)
         self.assertEqual(np.count_nonzero(w.cells==DEBRIS),w.debris_added)
         np.testing.assert_array_equal(w.cells==WALL,w.solids)
-        water=np.argwhere(w.cells==WATER)
+        water=w.film.samples(10000) if hasattr(w,"film") else np.argwhere(w.cells==WATER)
         self.assertGreater(np.ptp(water[:,0]),3)
         self.assertGreater(np.ptp(water[:,1]),3)
 
@@ -260,10 +261,11 @@ class JetTests(unittest.TestCase):
         s=SpraySession()
         with patch.object(s.world,"_push_axis",side_effect=AssertionError("Old pressure applied to runoff")):
             for _ in range(70): s.step(True)
-        self.assertGreater(np.count_nonzero(s.world.cells==WATER),500)
+        particles = s.world.water_particles if hasattr(s.world,"film") else np.count_nonzero(s.world.cells==WATER)
+        self.assertGreater(particles,500)
         self.assertEqual(s.jet.emitted,len(s.jet.positions)+s.jet.deposited+s.jet.escaped)
         self.assertEqual(s.jet.deposited,s.world.injected)
-        self.assertEqual(s.world.injected,np.count_nonzero(s.world.cells==WATER)+s.world.drained)
+        self.assertEqual(s.world.injected,particles+s.world.drained)
 
 
 class RenderTests(unittest.TestCase):
@@ -332,7 +334,8 @@ def gui_smoke(app):
     assert app.canvas.find_withtag("nozzle_cursor")
     assert len(app.canvas.find_withtag("scene_image"))==1
     assert len(app.canvas.find_all())<30,"Preview recreated hundreds of Tk particle items"
-    assert np.count_nonzero(w.cells==WATER)>0
+    particles = w.water_particles if hasattr(w,"film") else np.count_nonzero(w.cells==WATER)
+    assert particles>0
     assert app.session.repair.contact_seconds>0
     assert app.session.reactor.heat[node]<before,"Spray failed to cool the highlighted hot spot"
     np.testing.assert_array_equal(app.session.reactor.rng,rng)
@@ -350,7 +353,7 @@ def gui_smoke(app):
     app.root.update()
     app.release()
     assert not app.spraying
-    print(f"PASS 3D GUI: mouse nozzle, ballistic torrent, impact cooling, orbit; {np.count_nonzero(w.cells==WATER)} coolant voxels")
+    print(f"PASS 3D GUI: mouse nozzle, ballistic torrent, impact cooling, orbit; {particles} fluid particles")
 
 
 def benchmark(rules):
@@ -371,25 +374,26 @@ def benchmark(rules):
         raster.append((time.perf_counter()-t)*1000)
     result={
         "backend":"CPU NumPy + software 3D projection (no FPGA/GPU physics)",
+        "fluid_model":"FHP-style cylindrical surface films" if hasattr(s.world,"film") else "legacy 3D voxel falling cells",
         "volume_xyz":[rules.cfg.voxel.width,rules.cfg.voxel.height,rules.cfg.voxel.depth],
         "measured_steps":len(samples),"simulation_mean_ms":round(float(np.mean(samples)),3),
         "simulation_p95_ms":round(float(np.percentile(samples,95)),3),
         "scene_generation_mean_ms":round(float(np.mean(draw)),3),
         "alpha_raster_mean_ms":round(float(np.mean(raster)),3),
         "note":"Scene timing excludes Tk rasterization; milliseconds are NOT watts or energy.",
-        "packed_world_bytes":s.world.packed_bytes,
-        "packed_world_MB_per_second_at_30fps":s.world.packed_bytes*30/1e6,
+        "fluid_snapshot_bytes":s.world.packed_bytes,
+        "fluid_snapshot_MB_per_second_at_30fps":s.world.packed_bytes*30/1e6,
         "reactor_forecast_calls":0,"reactor_thermal_ticks":s.reactor.ticks,
         "in_flight_packets":len(s.jet.positions),
         "jet_state_host_bytes":s.jet.positions.nbytes+s.jet.velocities.nbytes+s.jet.age.nbytes+s.jet.entered.nbytes,
-        "offload_boundary":"Proposed CPU/GPU: visual Q10 flight; FPGA: impact deposition + 2-bit runoff + wet contacts. All currently CPU.",
+        "offload_boundary":"Proposed host: visual Q10 flight, geometry mapping, drained-water samples; FPGA: impacts + lattice-gas films + wet contacts. All currently CPU.",
         "impact_request_bytes_per_simulation_second":round(s.world.impact_command_bytes/s.world.ticks*rules.cfg.voxel.steps_per_second,1),
         "impact_commands":s.world.impact_commands,
         "idle_core_steps":s.world.idle_steps,
         "active_core_steps":s.world.active_steps,
-        "surface_contact_voxels":len(s.world.contact_nodes),
-        "upstream":"XY/ZY cell-table extension for runoff; NEW Q10 velocity packets before impact",
-        "power_status":"No LiteFury whole-board measurement or GPU baseline for this new 3D kernel"
+        "surface_sites":s.world.film.gas.channels.size if hasattr(s.world,"film") else len(s.world.contact_nodes),
+        "upstream":"Six-direction FHP-style collisions/streaming; NEW cylindrical mapping, forcing and source/drain rules",
+        "power_status":"CPU reference only: no board measurement, synthesized film engine, or matched optimized GPU baseline"
     }
     print(json.dumps(result,indent=2))
 

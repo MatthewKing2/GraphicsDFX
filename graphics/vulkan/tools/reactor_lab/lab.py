@@ -436,7 +436,10 @@ class Lab:
                 f"Resident futures: {min(cfg.forecast.trials,cfg.forecast.trial_batch_size)}\n"
                 f"Rod result payload: {4+2*r.total_rods} bytes\n"
                 "Assumes current routing remains.\nNo operator cooling in forecast.\n\n"
-                "Integer thermal/PRNG model.\nNo measured FPGA power claim.")
+                +(f"Neutron transport: {cfg.neutron.walkers_per_rod} sources/rod\n"
+                  f"{cfg.neutron.max_steps} steps, {cfg.neutron.generations} generations\n"
+                  "Fissions -> heat -> future failures.\n" if cfg.neutron.enabled else "Legacy thermal/PRNG model.\n")+
+                "No measured FPGA power claim.")
         elif self.phase == "failed":
             self.mode.configure(text="SHIP LOST")
             self.headline.configure(text="TOO LATE", fg="#ff6866")

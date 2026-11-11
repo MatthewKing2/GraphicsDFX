@@ -20,6 +20,8 @@ _INTEGER_FIELDS = {
     "connections": "neighbors_per_cell seed",
     "cooling": "group_size group_seed direct_heat_per_pulse linked_heat_per_pulse axial_radius_cells",
     "forecast": "trials seed trial_batch_size",
+    "neutron": "walkers_per_rod max_steps generations rod_pitch fuel_width fuel_absorb_256 moderator_absorb_256 fission_base_256 fission_load_256 hot_feedback_256 hot_source_256 heat_per_fission seed",
+    "lattice": "film_rows film_columns steps_per_tick gravity_256 splash_radius max_drawn_drips seed",
     "foam": "steps_per_second grid_width grid_height gravity_every_steps diagonal_every_steps flow_every_steps debris_every_steps seed",
     "voxel": "width height depth steps_per_second rod_radius rod_columns nozzle_radius jet_radius jet_push_passes drain_every_steps debris_every_steps seed render_bands max_drawn_particles frame_milliseconds jet_particles_per_step jet_max_particles jet_splash_radius runoff_gravity_passes max_drawn_jet_particles max_simulation_steps_per_frame",
     "ui": "frame_milliseconds panel_columns panel_rod_columns room_rod_columns cell_width_pixels cell_height_pixels max_drawn_particles rod_height_pixels bank_columns bank_width_pixels bank_height_pixels cable_gap_pixels cable_width_pixels socket_radius_pixels spark_count",
@@ -32,11 +34,14 @@ _FLOAT_FIELDS = {
     "cooling": "pulse_seconds",
     "timing": "rod_step_seconds travel_seconds treatment_seconds repair_deadline_seconds return_settle_seconds",
     "forecast": "horizon_seconds refresh_seconds",
+    "neutron": "source_width_fraction",
+    "lattice": "drip_lifetime_seconds drip_speed",
     "foam": "spray_radius_cells",
     "voxel": "rod_top_fraction rod_bottom_fraction demo_deadline_seconds jet_speed_voxels_per_second jet_gravity_voxels_per_second2 jet_spread_degrees jet_max_lifetime_seconds nozzle_aim_offset_pixels water_render_scale water_render_opacity jet_render_scale jet_render_opacity",
     "ui": "gradient_smoothing_cells flow_speed_pixels_per_second flow_arrow_spacing_pixels rod_color_saturation rod_color_value heat_trend_deadband flow_min_speed_pixels_per_second flow_speed_exponent cable_brightness alarm_flash_hz spark_length_pixels",
 }
-_BOOL_FIELDS = {"initial": "showcase", "cooling": "stack_linked_cooling require_active_spray", "voxel": "cool_residual_water"}
+_BOOL_FIELDS = {"initial": "showcase", "cooling": "stack_linked_cooling require_active_spray", "voxel": "cool_residual_water",
+                "neutron": "enabled", "lattice": "enabled"}
 _STRING_FIELDS = {
     "connections": "mode", "cooling": "group_mode",
     "ui": "foam_color debris_color background_color panel_color text_color muted_color linked_color selected_color accent_color flow_color alarm_color alarm_dim_color spark_color",
@@ -175,6 +180,21 @@ class Config:
             bounded(getattr(self.layout, key), 1, hi, "layout." + key)
         count = self.layout.reactors * self.layout.rods_per_reactor * self.layout.cells_per_rod
         bounded(count, 1, 8192, "total cells")
+        for key, lo, hi in (("walkers_per_rod",1,64),("max_steps",1,256),("generations",1,3),
+                            ("rod_pitch",2,16),("fuel_width",1,self.neutron.rod_pitch-1),
+                            ("heat_per_fission",0,16),("seed",0,0xffffffff)):
+            bounded(getattr(self.neutron,key),lo,hi,"neutron."+key)
+        bounded(self.neutron.source_width_fraction,.01,1,"neutron.source_width_fraction")
+        for key, lo, hi in (("film_rows",8,256),("film_columns",8,256),("steps_per_tick",1,8),
+                            ("splash_radius",0,8),("max_drawn_drips",0,1000),("seed",0,0xffffffff)):
+            bounded(getattr(self.lattice,key),lo,hi,"lattice."+key)
+        bounded(self.lattice.drip_lifetime_seconds,.05,5,"lattice.drip_lifetime_seconds")
+        bounded(self.lattice.drip_speed,0,100,"lattice.drip_speed")
+        bounded(self.layout.rods_per_reactor*self.lattice.film_rows*self.lattice.film_columns,
+                1,1048576,"lattice sites per chamber")
+        if self.neutron.enabled and (self.forecast.trials*self.layout.reactors*self.layout.rods_per_reactor*
+                                     self.neutron.walkers_per_rod*2**(self.neutron.generations-1)>2_000_000):
+            raise ValueError("Too many forecast neutron walkers; reduce trials, sources, generations or rods")
         p = self.power
         bounded(p.banks, 1, 64, "power.banks")
         bounded(p.plugs_per_bank, 1, 128, "power.plugs_per_bank")

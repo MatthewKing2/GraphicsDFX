@@ -78,6 +78,9 @@
 !graphics/vulkan/tools/reactor_lab/spray3d.py
 !graphics/vulkan/tools/reactor_lab/test_voxel.py
 !graphics/vulkan/tools/reactor_lab/power_audit.py
+!graphics/vulkan/tools/reactor_lab/neutron.py
+!graphics/vulkan/tools/reactor_lab/lattice.py
+!graphics/vulkan/tools/reactor_lab/test_transport.py
 !graphics/vulkan/tools/reactor_lab/settings.toml
 !graphics/vulkan/tools/reactor_lab/presets/
 !graphics/vulkan/tools/reactor_lab/presets/*.toml
