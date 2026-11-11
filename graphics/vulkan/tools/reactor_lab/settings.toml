@@ -1,0 +1,240 @@
+# ROD / RESCUE -- edit here, then press F5 (reload + restart).
+# Or click SETTINGS in the demo to edit/apply/save without leaving it.
+# Every preset extends THIS file. R resets the current settings/seed.
+# Rates ending in _256 are chances out of 256: 0=never, 128=50%, 256=always.
+# Forecast percentages are computed, never forced by these color/pacing knobs.
+# Quick knobs: [layout], [power] counts/loads, [thermal] diffusion/runaway,
+# [timing] travel/treatment, [cooling] foam strength/reach, [forecast] work/accuracy.
+# SETTINGS -> Apply temporarily lets you try changes before saving.
+# Numeric fields also accept formulas as strings starting with '='.
+# Use section.key references, + - * / // %, min/max/round/ceil/floor.
+# Formulas are resolved AFTER preset overrides; cycles/typos are rejected.
+
+[layout]
+reactors = 1
+rods_per_reactor = 6
+# Internal spatial resolution; the UI renders one continuous rod, not cell boxes.
+cells_per_rod = 128
+
+[power]
+# Total socket capacity must accommodate all rods. Occupied sockets swap cables.
+banks = 4
+plugs_per_bank = 4
+# Labels/colors repeat or auto-generate if you add more banks.
+bank_names = ["PROPULSION", "LIFE SUPPORT", "SHIELDS", "FABRICATION"]
+bank_colors = ["#61cfc5", "#d2ad65", "#9293ec", "#df8294"]
+seed = 45
+# Fictional game GW: capacity is a HARD output limit, not a target output.
+rod_capacity_gw = 100.0
+# Each bank requests 25%-95% of its fair share of total installed capacity.
+# Demand is shared by connected rods: 50 GW / 2 rods = 25 GW each.
+demand_min = "= layout.reactors * layout.rods_per_reactor * power.rod_capacity_gw / power.banks * 0.25"
+demand_max = "= layout.reactors * layout.rods_per_reactor * power.rod_capacity_gw / power.banks * 0.95"
+demand_period_seconds = 420.0
+phase_stride_seconds = "= power.demand_period_seconds / power.banks"
+nominal_rod_load = "= power.rod_capacity_gw * 0.6"
+base_heat = 4
+heat_at_nominal_load = 16
+# Underpowered banks count down to a ship blackout. Extra demand isn't generated
+# magically above 100 GW/rod: the panel shows that unmet demand explicitly.
+blackout_seconds = 20.0
+
+
+[tuning]
+# Start with these three knobs; scaling is compiled to integer rates once.
+fault_scale = 1.0
+heating_scale = 1.0
+recovery_scale = 1.0
+
+[initial]
+seed = 7
+heat_min = 10
+heat_max = 15
+fault_chance_256 = 16
+# Smooth starting hot spots, distributed along whole rods.
+showcase = true
+isolated_heat = 21
+cluster_target_heat = 23
+cluster_heat_min = 15
+cluster_heat_max = 19
+hotspot_width_fraction = 0.14
+
+[thermal]
+hot_heat = 18
+surge_heat = 25
+critical_heat = 31
+safe_heat = 16
+# Reaching surge_heat latches a runaway hot spot: rerouting alone won't cure it.
+runaway_heating_256 = 48
+diffusion_256 = 96
+diffusion_passes = 2
+heat_step = 1
+cool_step = 1
+ignition_loaded_256 = 5
+ignition_quiet_256 = 1
+ignition_per_hot_neighbor_256 = 4
+ignition_if_hot_256 = 4
+fault_recovery_loaded_256 = 20
+fault_recovery_surge_256 = 6
+fault_recovery_quiet_256 = 16
+heating_256 = 18
+heating_per_hot_neighbor_256 = 4
+surge_heating_256 = 32
+background_reheating_256 = 96
+# Occasional coherent hot spots, shared by live/prediction rules. These are
+# actual thermal events, NOT fake probability smoothing. 0 disables them.
+hotspot_loaded_256 = 4
+hotspot_quiet_256 = 1
+hotspot_heat_step = 3
+hotspot_width_fraction = 0.08
+cooling_loaded_256 = 36
+cooling_quiet_256 = 64
+extra_quiet_cooling_256 = 16
+
+[connections]
+# Optional extra fault coupling. Axial heat diffusion is always local to a rod.
+# 0 disables extra graph coupling; diffusion is controlled above.
+mode = "local"
+neighbors_per_cell = 0
+seed = 2026
+
+[cooling]
+# INCLUDING the touched cell: 16 means it cools 15 other cells too.
+# Sizes need not divide the board; the last group can be smaller.
+group_size = 16
+group_mode = "cross_reactor" # cross_reactor, random, local
+group_seed = 2026
+direct_heat_per_pulse = 2
+linked_heat_per_pulse = 0 # optional legacy cooling-group bonus; off by default
+axial_radius_cells = 10 # foam spreads cooling around the contact point
+pulse_seconds = 1.0
+# false prevents spraying several cells on one circuit multiplying its bonus.
+stack_linked_cooling = false
+require_active_spray = true
+
+[timing]
+rod_step_seconds = 1.0
+travel_seconds = 5.0
+treatment_seconds = 15.0
+repair_deadline_seconds = 40.0
+return_settle_seconds = 1.0
+
+[forecast]
+horizon_seconds = 60.0
+trials = 64
+refresh_seconds = 2.5
+seed = 8128
+
+[foam]
+steps_per_second = 30
+grid_width = 192
+grid_height = 128
+spray_radius_cells = 5.0
+gravity_every_steps = 1
+diagonal_every_steps = 1
+flow_every_steps = 1
+debris_every_steps = 12 # 0 disables debris
+seed = 19
+
+# Standalone TRUE 3D cell demo: python .../reactor_lab/spray3d.py
+# The existing panel/2D room stays unchanged. This is a proposed accelerator,
+# not an FPGA implementation or physically accurate water/foam solver.
+[voxel]
+width = 48
+height = 64
+depth = 48
+steps_per_second = 60
+rod_radius = 3
+rod_top_fraction = 0.14
+rod_bottom_fraction = 0.9
+rod_columns = 3
+nozzle_radius = 1
+jet_radius = 2
+jet_push_passes = 3
+# New hybrid spray: a fast fixed-point jet in flight, voxel fluid AFTER impact.
+jet_particles_per_step = 96
+jet_max_particles = 4096
+jet_speed_voxels_per_second = 150.0
+jet_gravity_voxels_per_second2 = 18.0
+jet_spread_degrees = 4.0
+jet_splash_radius = 3
+jet_max_lifetime_seconds = 1.5
+runoff_gravity_passes = 4 # heavier downward runoff instead of hovering spray
+# Mouse is the nozzle outlet; the aim marker is this far above it on screen.
+nozzle_aim_offset_pixels = 110.0
+# Display only: smaller translucent samples; the simulated water volume is unchanged.
+water_render_scale = 0.65
+water_render_opacity = 0.35
+jet_render_scale = 0.5
+jet_render_opacity = 0.25
+max_drawn_jet_particles = 220
+# Bound catch-up work so input stays responsive. On a slow CPU this preview
+# deliberately runs the simulation slower instead of building a time backlog.
+max_simulation_steps_per_frame = 3
+cool_residual_water = true # coolant already in flight/on a rod still cools after release
+drain_every_steps = 6 # 0 = sealed floor; tracks every removed particle
+debris_every_steps = 120 # 0 disables falling debris
+seed = 2026
+render_bands = 24
+max_drawn_particles = 650
+frame_milliseconds = 20
+demo_deadline_seconds = 180.0
+
+[ui]
+frame_milliseconds = 80 # Tk prototype redraw interval, NOT the thermal timestep
+panel_columns = 2
+panel_rod_columns = 6
+room_rod_columns = 3
+rod_height_pixels = 180
+# Display-only smoothing; the simulation/forecast retain every internal point.
+gradient_smoothing_cells = 2.0
+# Empty = generate stable unique rod/wire colors. Optional overrides: ["#..."]
+rod_colors = []
+rod_color_saturation = 0.55
+rod_color_value = 0.95
+# VISUAL exaggeration only: min + (max-min) * utilization^exponent.
+# Actual GW sharing/heat math is unchanged. Zero output has no moving arrows.
+flow_speed_pixels_per_second = 640.0 # maximum at 100% output
+flow_min_speed_pixels_per_second = 3.0
+flow_speed_exponent = 3.0
+flow_arrow_spacing_pixels = 180.0 # enough spacing to avoid fast-arrow strobing
+flow_color = "#f4ffff"
+heat_trend_deadband = 0.01
+bank_columns = 4
+bank_width_pixels = 174
+bank_height_pixels = 150
+cable_gap_pixels = 135
+cable_width_pixels = 12
+cable_brightness = 0.4 # preserve each rod's hue, darken only the wire
+alarm_flash_hz = 1.5
+alarm_color = "#ff5549"
+alarm_dim_color = "#502422"
+spark_color = "#ffe5a0"
+spark_count = 8
+spark_length_pixels = 20.0
+socket_radius_pixels = 8
+cell_width_pixels = 38
+cell_height_pixels = 22
+max_drawn_particles = 1700
+# Ascending lower bounds. Orange at 70%, true red only at 97%+.
+risk_bands = [
+  [0.0, "#1d4547"],
+  [0.1, "#386c61"],
+  [0.3, "#827442"],
+  [0.5, "#ad8b42"],
+  [0.7, "#df963f"],
+  [0.9, "#dc6542"],
+  [0.97, "#c52f49"],
+]
+# Chamber glow is actual heat, NOT a new forecast while foam is active.
+heat_colors = ["#226964", "#439877", "#84b97a", "#d8be66", "#ec9957", "#ed6b50", "#ff484e", "#ff9290"]
+foam_color = "#c2f6ed"
+debris_color = "#bd8862"
+background_color = "#091218"
+panel_color = "#10232c"
+text_color = "#e3f0ed"
+muted_color = "#89a8ad"
+linked_color = "#71e2c5"
+selected_color = "#ffffff"
+accent_color = "#ffc56b"
+

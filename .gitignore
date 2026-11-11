@@ -69,6 +69,17 @@
 !graphics/vulkan/tools/relay_lab/lab.py
 !graphics/vulkan/tools/relay_lab/measure_power.py
 !graphics/vulkan/tools/relay_lab/open.bat
+!graphics/vulkan/tools/reactor_lab/
+!graphics/vulkan/tools/reactor_lab/model.py
+!graphics/vulkan/tools/reactor_lab/lab.py
+!graphics/vulkan/tools/reactor_lab/test_model.py
+!graphics/vulkan/tools/reactor_lab/config.py
+!graphics/vulkan/tools/reactor_lab/voxel.py
+!graphics/vulkan/tools/reactor_lab/spray3d.py
+!graphics/vulkan/tools/reactor_lab/test_voxel.py
+!graphics/vulkan/tools/reactor_lab/settings.toml
+!graphics/vulkan/tools/reactor_lab/presets/
+!graphics/vulkan/tools/reactor_lab/presets/*.toml
 !docs/relay-lab.md
 !docs/relay-power-results.json
 !docs/relay-power-samples.csv

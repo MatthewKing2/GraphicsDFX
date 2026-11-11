@@ -1,0 +1,15 @@
+# Handy layout/interaction experiment, not a hardware resource estimate.
+[layout]
+reactors = 2
+rods_per_reactor = 4
+cells_per_rod = 64
+[power]
+banks = 3
+plugs_per_bank = 3
+[cooling]
+group_size = 12
+[forecast]
+trials = 128
+[ui]
+panel_rod_columns = 4
+room_rod_columns = 4

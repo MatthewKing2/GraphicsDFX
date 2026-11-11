@@ -1,0 +1,8 @@
+[tuning]
+fault_scale = 1.15
+heating_scale = 1.1
+recovery_scale = 0.9
+[power]
+heat_at_nominal_load = 17
+[cooling]
+group_size = 8
