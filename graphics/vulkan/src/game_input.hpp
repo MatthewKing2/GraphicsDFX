@@ -5,6 +5,9 @@ struct GameControls {
     bool jump = false, restart = false, pause = false, backend = false, guidance = false,
          stats = false;
     bool focused = true;
+    // Additive first-person/console controls; existing tunnel controls unchanged.
+    bool interact = false, sprint = false, primary = false, secondary = false;
+    float cursorX = 0, cursorY = 0; // normalized window coordinates, top-left 0,0
 };
 class GameInput {
   public:

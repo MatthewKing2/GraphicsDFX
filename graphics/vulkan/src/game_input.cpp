@@ -9,6 +9,7 @@ class GameInput::Impl {
     GLFWwindow *window;
     std::array<bool, GLFW_KEY_LAST + 1> previous{};
     bool captured = false, first = true;
+    bool previousLeft = false, previousRight = false;
     double lastX = 0, lastY = 0;
     float dx = 0, dy = 0;
     inline static Impl *active = nullptr;
@@ -75,5 +76,17 @@ GameControls GameInput::sample() {
     c.backend = impl->pressed(GLFW_KEY_F1);
     c.guidance = impl->pressed(GLFW_KEY_F2);
     c.stats = impl->pressed(GLFW_KEY_F3);
+    c.interact = impl->pressed(GLFW_KEY_E);
+    c.sprint = impl->down(GLFW_KEY_LEFT_SHIFT);
+    bool left = glfwGetMouseButton(impl->window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    bool right = glfwGetMouseButton(impl->window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    c.primary = left && !impl->previousLeft;
+    c.secondary = right && !impl->previousRight;
+    impl->previousLeft = left; impl->previousRight = right;
+    double x, y; int width, height;
+    glfwGetCursorPos(impl->window, &x, &y);
+    glfwGetWindowSize(impl->window, &width, &height);
+    c.cursorX = width > 0 ? float(x / width) : 0;
+    c.cursorY = height > 0 ? float(y / height) : 0;
     return c;
 }

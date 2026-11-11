@@ -22,7 +22,7 @@ LIBS = \
 -lshell32 \
 -lole32
 
-.PHONY: all shaders test game game-test
+.PHONY: all shaders test game game-test control-room control-room-test
 
 all: shaders $(OUT)
 
@@ -35,6 +35,21 @@ GAME_SRC = src/game_main.cpp src/game.cpp src/game_input.cpp src/prediction.cpp 
 GAME_HEADERS = src/game.hpp src/game_input.hpp src/prediction.hpp src/gpu_prediction.hpp src/compute_context.hpp src/renderer.hpp shaders/prediction_kernel.inc shaders/tunnel_math.inc shaders/tunnel_config.inc shaders/reactor_kernel.inc
 
 game: build/scene.spv build/predict.spv build/frag.spv build/survival_game.exe
+
+# Swap just this implementation file when adding a GPU/FPGA backend. Each
+# backend gets its own executable: changing a flag cannot run a stale binary.
+PLANT_BACKEND ?= cpu
+PLANT_BACKEND_SRC = src/plant_$(PLANT_BACKEND).cpp
+ROOM_SRC = src/control_room_main.cpp src/control_room.cpp src/plant_compute.cpp $(PLANT_BACKEND_SRC) src/game_input.cpp src/renderer.cpp src/nbody.cpp
+ROOM_HEADERS = src/control_room.hpp src/plant_compute.hpp src/game_input.hpp src/renderer.hpp src/nbody.hpp src/profiling.hpp src/compute_context.hpp
+
+control-room: build/scene.spv build/frag.spv build/control_room_$(PLANT_BACKEND).exe
+
+build/control_room_$(PLANT_BACKEND).exe: $(ROOM_SRC) $(ROOM_HEADERS) | build
+	$(CXX) $(ROOM_SRC) $(CXXFLAGS) $(INCLUDES) $(LIBS) -o $@
+
+control-room-test: control-room
+	./build/control_room_$(PLANT_BACKEND).exe --self-test
 
 build/scene.spv: shaders/scene.vert
 	$(GLSLC) $< -o $@

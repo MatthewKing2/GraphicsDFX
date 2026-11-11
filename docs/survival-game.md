@@ -1,4 +1,108 @@
-# Current game: REACTOR / RUN
+# Current MVP: VESSEL 09 control room
+
+A separate native C++ / Vulkan first-person prototype. No Python runtime, game
+engine, new graphics dependencies, or external art assets. The older tunnel game,
+N-body program and Python experiments are still available, unchanged in purpose.
+
+## Play the control room
+
+From Git Bash, starting at the repository root:
+
+```bash
+cd graphics/vulkan
+make control-room
+./build/control_room_cpu.exe
+```
+
+Or double-click `graphics/vulkan/control-room.bat`. If building in PowerShell,
+use `make control-room VULKAN_SDK=C:/VulkanSDK/1.4.341.1`.
+
+- WASD: walk. Mouse: look. Shift: move faster.
+- Walk towards the wall console, then press E to use it. Mouse becomes a pointer.
+- Click a rod, then click a power bank to move its cable to a free plug.
+  Hover highlights its cable. Right click cancels selection.
+- E or Escape leaves the console. Outside the console, Escape pauses/releases
+  the mouse; Escape again resumes. R resets the plant. Close the window to quit.
+
+The panel shows axial temperature gradients, unique rod/cable colors, delivered
+GW, bank demand, moving current arrows and flashing under-supply alarms. Rod
+percentages mean **chance of any part of that rod reaching critical temperature
+within the next 60 simulation seconds, assuming no future player intervention**.
+`--` means a current prediction isn't available yet. Predictions are finite
+Monte Carlo estimates, not guarantees or nuclear engineering calculations.
+
+Reactor time advances only while using the console, leaving the future coolant
+workload mutually exclusive. A clock-held message makes that visible. This is a
+room/panel MVP: the maintenance door isn't usable, spraying is not integrated,
+and there is no loss screen yet. A latched runaway currently needs R to reset.
+
+## Compute boundary and tuning
+
+- `src/plant_compute.hpp`: low-level integer configuration, snapshots, commands,
+  panel output and forecast hit counters. No graphics types inside the contract.
+- `src/plant_cpu.cpp`: bounded neutron random walks, absorption/fission, limited
+  child generations, normalized Q6 heat deposition, axial diffusion and cooling.
+  The same transition runs live and in sampled futures. It follows the Python
+  neutron model, but is not a byte-for-byte NumPy port or hardware validation.
+- `src/control_room.cpp`: room geometry, camera, panel drawing and picking only.
+- `src/control_room_main.cpp`: orchestration and one background forecast job;
+  results from old routing/reset generations are rejected. No prediction queue
+  can accumulate. No render-thread wait for normal prediction completion.
+
+The backend owns its state. The game sends advance/reroute commands and caches
+panel snapshots; rendering doesn't fetch simulation state every frame. A future
+device backend can keep state resident. `save()` is an explicit checkpoint, used
+by this CPU forecast scheduling adapter, not a proposed per-frame PCIe transfer.
+Actual packet framing, byte order, XDMA and GPU/device submission remain future
+work; these C++ structures must not simply be memcpy'd onto PCIe unversioned.
+
+`make control-room PLANT_BACKEND=cpu` selects the current implementation.
+When implemented, `src/plant_gpu.cpp` or `src/plant_fpga.cpp` will provide the same
+factory/API and get a distinct executable name. Those backends do **not** exist
+yet: this build is CPU simulation/forecast + GPU rendering, with no silent FPGA
+fallback and no energy-win claim. Coolant will get its own independent backend
+when the chamber is integrated, rather than being entangled with room drawing.
+
+Most simulation knobs are in `plant::Config`; movement/prediction settings are
+in `controlroom::Settings`. Quick layout overrides, for example:
+
+```bash
+./build/control_room_cpu.exe --reactors 1 --rods 8 --banks 3 --plugs 4 --segments 64 --trials 32
+```
+
+Counts are validated. The physical panel supports up to four reactor rows and
+twelve rods per row, within the backend's 32-rod total. Larger layouts need a
+larger/paged display, not a different compute interface. Existing Python TOML
+files are preserved; this C++ MVP doesn't parse them.
+
+## Checks
+
+`make control-room-test` runs deterministic CPU tests, routing/full-plug checks,
+forecast isolation/critical-union checks, camera bounds, console transitions and
+camera-projection-to-panel picking tests. `--profile` prints average host scene
+build, renderer call, GPU render, plant tick and background forecast times.
+Forecast time overlaps rendering; these numbers must not be added as a frame
+breakdown or interpreted as energy measurements.
+
+`tests/control-room-checks.ps1` runs hidden, bounded Vulkan/synchronization checks
+and saves room/panel/alternate-layout BMPs under `build/`. For a manual capture:
+
+```bash
+./build/control_room_cpu.exe --panel-view --frames 180 --capture build/panel.bmp --profile
+```
+
+Checked on the development laptop: the CPU tests and all three room Vulkan/
+synchronization checks passed; room, console and alternate-layout screenshots
+were inspected. A 300-frame console run took 5.24 seconds (~57 FPS at the 60 FPS
+cap): about 0.27 ms scene construction, 0.22 ms GPU rendering, 0.15 ms per thermal
+tick, and 384 ms per asynchronous 64-trial/60-second forecast. These short runs
+include validation and are responsiveness checks, not optimized benchmarks.
+The previous tunnel game's CPU/GPU validation and rendered regression checks
+also passed after the shared input/shader additions.
+
+---
+
+# Previous game: REACTOR / RUN
 
 The reactor iteration is now implemented. See [reactor-escape.md](reactor-escape.md)
 for the current mechanics, controls, coupled-relay computation, profiling commands,

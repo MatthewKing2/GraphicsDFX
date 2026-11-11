@@ -29,6 +29,13 @@
 !graphics/
 !graphics/vulkan/
 !graphics/vulkan/play.bat
+!graphics/vulkan/control-room.bat
+!graphics/vulkan/src/control_room_main.cpp
+!graphics/vulkan/src/control_room.cpp
+!graphics/vulkan/src/control_room.hpp
+!graphics/vulkan/src/plant_compute.hpp
+!graphics/vulkan/src/plant_compute.cpp
+!graphics/vulkan/src/plant_cpu.cpp
 !graphics/vulkan/src/
 !graphics/vulkan/src/renderer.cpp
 !graphics/vulkan/src/renderer.hpp
@@ -61,6 +68,7 @@
 !graphics/vulkan/tests/nbody_test.cpp
 !graphics/vulkan/tests/benchmark.ps1
 !graphics/vulkan/tests/game-checks.ps1
+!graphics/vulkan/tests/control-room-checks.ps1
 !graphics/vulkan/tools/
 !graphics/vulkan/tools/relay_lab/
 !graphics/vulkan/tools/relay_lab/Makefile

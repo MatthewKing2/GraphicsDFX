@@ -24,5 +24,17 @@ void main() {
         fragColor = object.tint.rgb * (object.tint.w == 3.0 ? vec3(1) : inColor) *
             (object.tint.w == 3.0 ? 1.0 : fog);
     }
+    // Control-room material only. Keep the older tunnel/N-body modes unchanged.
+    // Cheap vertex-lit practical lamps + CRT spill; no engine or light buffers.
+    if (object.tint.w == 4.0) {
+        vec3 lighting = vec3(.29, .34, .30);
+        vec3 lamps[3] = vec3[3](vec3(0,3.1,-2), vec3(0,3.1,2), vec3(0,1.9,-3.1));
+        vec3 colors[3] = vec3[3](vec3(1.1,.73,.34), vec3(.65,.43,.2), vec3(.15,.62,.39));
+        for (int i=0; i<3; ++i) {
+            vec3 d = position.xyz - lamps[i];
+            lighting += colors[i] * (2.3 / (1.0 + dot(d,d)));
+        }
+        fragColor = object.tint.rgb * inColor * lighting;
+    }
     fragTexCoord = inTexCoord;
 }
