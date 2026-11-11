@@ -119,6 +119,11 @@ hot_feedback_256 = 1 # extra fission chance per heat unit above hot_heat
 hot_source_256 = 64 # fraction of sources near a rod's hottest patch
 source_width_fraction = 0.08
 heat_per_fission = 2
+# Histories are samples, not extra physical fuel. Normalize their tallies by
+# walkers_per_rod, then convert energy to temperature through thermal inertia.
+# More histories improve the estimate instead of increasing average heat.
+source_strength = 8
+heat_capacity = 8
 seed = 1741
 
 [lattice]

@@ -249,11 +249,23 @@ class Rules:
         falling = (heat>operating)&~runaway&(((rng>>24)&255)<
                     np.where(loaded,q["cooling_loaded_256"],q["cooling_quiet_256"]))
         energy = round(cfg.neutron.heat_per_fission*cfg.tuning.heating_scale)
-        h = np.clip(heat.astype(np.int32)+counts.astype(np.int32)*energy+
-                    (background.astype(np.int32)+rising)*cfg.thermal.heat_step-
-                    falling*cfg.thermal.cool_step,0,cfg.thermal.critical_heat).astype(np.uint8)
+        # A history is a Monte Carlo SAMPLE. Its weight is source_strength / N,
+        # not one extra physical neutron as N changes. Heat capacity then turns
+        # deposited energy into temperature instead of instant whole-unit jumps.
+        # Six fractional bits fit in the previously unused upper fault bits:
+        # fault[0]=reaction activity, fault[1]=runaway, fault[7:2]=heat fraction.
+        # This fraction is part of the live/forecast snapshot (no hidden state).
+        # Retain small deposits; truncating each to uint8 would erase them.
+        dose = (counts.astype(np.int64)*energy*cfg.neutron.source_strength*64 //
+                (cfg.neutron.walkers_per_rod*cfg.neutron.heat_capacity))
+        thermal = ((heat.astype(np.int64)<<6)+(fault>>2)+dose+
+                   ((background.astype(np.int32)+rising)*cfg.thermal.heat_step-
+                    falling*cfg.thermal.cool_step)*64)
+        thermal = np.clip(thermal,0,cfg.thermal.critical_heat<<6)
+        h = (thermal>>6).astype(np.uint8)
         runaway |= h>=cfg.thermal.surge_heat
-        return h,(counts>0).astype(np.uint8)|(runaway.astype(np.uint8)<<1),rng
+        flags = (counts>0).astype(np.uint8)|(runaway.astype(np.uint8)<<1)|((thermal&63).astype(np.uint8)<<2)
+        return h,flags,rng
 
     def legacy_transition(self, heat, fault, rng, tick=0, sockets=None, operating_rods=None):
         """Original random-event model, retained for comparison/regressions."""
@@ -460,13 +472,17 @@ class Repair:
                 amount = cfg.cooling.linked_heat_per_pulse * (int(count) if cfg.cooling.stack_linked_cooling else 1)
                 members = rules.groups[g]
                 delta[members] = np.maximum(delta[members], amount)
-            self.reactor.heat = np.maximum(self.reactor.heat.astype(np.int32) - delta, 0).astype(np.uint8)
+            previous = self.reactor.heat.astype(np.int32)
+            self.reactor.heat = np.maximum(previous - delta, 0).astype(np.uint8)
+            # Only cooling that removes ALL stored energy clears its fraction.
+            # Uncontacted rods retain their exact paused thermal state.
+            self.reactor.fault[delta>previous] &= np.uint8(3)
             cooled = (delta > 0) & (self.reactor.heat <= cfg.thermal.safe_heat)
-            self.reactor.fault[cooled] &= np.uint8(2)
+            self.reactor.fault[cooled] &= np.uint8(254)  # clear activity only
             for rod in range(rules.total_rods):
                 section = slice(rod*rules.segments, (rod+1)*rules.segments)
                 if self.reactor.heat[section].max() <= cfg.thermal.safe_heat:
-                    self.reactor.fault[section] &= np.uint8(1)
+                    self.reactor.fault[section] &= np.uint8(253)  # clear runaway only
         self.won = bool(self.contact_seconds >= cfg.timing.treatment_seconds and
                         self.reactor.heat.reshape(rules.total_rods,rules.segments)[self.target//rules.segments].max() <= cfg.thermal.safe_heat)
 

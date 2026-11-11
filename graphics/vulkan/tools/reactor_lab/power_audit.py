@@ -49,7 +49,7 @@ def reactor_audit(cfg, repeats, device_batch_size=8):
         "cells":rules.count,"rods":rules.total_rods,"trials":result.trials,"steps_per_future":rules.steps,
         "total_cell_updates_per_forecast":rules.count*result.trials*rules.steps,
         "refresh_seconds":cfg.forecast.refresh_seconds,
-        "state_per_cell":"uint8 heat + uint8 fault + uint32 RNG + bool ever-failed (7 host bytes)",
+        "state_per_cell":"uint8 whole heat + uint8 flags/Q6 heat fraction + uint32 RNG + bool ever-failed (7 host bytes)",
         "thermal_model":"bounded neutron transport + fission heat + diffusion/runaway" if cfg.neutron.enabled else "legacy random thermal events",
         "neutron_sources_per_future_step":rules.total_rods*cfg.neutron.walkers_per_rod if cfg.neutron.enabled else 0,
         "neutron_generations":cfg.neutron.generations if cfg.neutron.enabled else 0,

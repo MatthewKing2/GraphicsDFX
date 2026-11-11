@@ -75,8 +75,8 @@ class NeutronTests(unittest.TestCase):
                 "neutron":{"walkers_per_rod":8}})
         w=Reactor(r)
         w.heat[:]=10
-        h,_,_=r.transition(w.heat,w.fault,w.rng,sockets=w.sockets)
-        self.assertGreater(int(h.sum()),int(w.heat.sum()))
+        h,flags,_=r.transition(w.heat,w.fault,w.rng,sockets=w.sockets)
+        self.assertGreater(int((h.astype(np.uint32)*64+(flags>>2)).sum()),int(w.heat.sum())*64)
         a=r.forecast(w.heat,w.fault,sockets=w.sockets)
         r2=rules({"forecast":{"trial_batch_size":5},"thermal":{"diffusion_passes":0,
                 "background_reheating_256":0,"cooling_quiet_256":0,"cooling_loaded_256":0},
@@ -88,8 +88,84 @@ class NeutronTests(unittest.TestCase):
     def test_new_config_fields_support_formulas_and_reject_bad_budgets(self):
         self.assertEqual(rules().cfg.neutron.walkers_per_rod,2)
         for bad in ({"neutron":{"generations":4}}, {"lattice":{"film_rows":0}},
+                    {"neutron":{"heat_capacity":0}},
                     {"neutron":{"fuel_width":4,"rod_pitch":4}}):
             with self.assertRaises(ValueError): rules(bad)
+
+    def test_default_opening_no_longer_runs_away_on_first_step(self):
+        # Actual shipped config/seed: previously latched on step 1, died on 6.
+        r=Rules();w=Reactor(r)
+        for _ in range(10):
+            w.step()
+            self.assertFalse(w.runaway_rods.any())
+            self.assertLess(int(w.heat.max()),r.cfg.thermal.critical_heat)
+
+    def test_rerouting_buys_time_but_ignoring_overload_is_still_dangerous(self):
+        r=Rules()
+        ignored,managed=Reactor(r),Reactor(r)
+        # Move the spare rod on bank 0 to the initially overloaded bank 2.
+        managed.reroute(4,9)
+        failure=None
+        for tick in range(60):
+            managed.step()
+            self.assertFalse(managed.runaway_rods.any())
+            self.assertFalse(managed.blackout.any())
+            self.assertLess(int(managed.heat.max()),r.cfg.thermal.critical_heat)
+            ignored.step()
+            if failure is None and int(ignored.heat.max())>=r.cfg.thermal.critical_heat:
+                failure=tick+1
+        self.assertIsNotNone(failure,"Fix must not disable dangerous reactions")
+        self.assertGreaterEqual(failure,25)
+
+    def test_heat_is_normalized_by_samples_and_fractional_energy_accumulates(self):
+        output=[]
+        quiet={"diffusion_passes":0,"background_reheating_256":0,"cooling_loaded_256":0,
+               "cooling_quiet_256":0,"runaway_heating_256":0}
+        for samples in (4,8,16,32):
+            r=rules({"neutron":{"walkers_per_rod":samples},"thermal":quiet})
+            h=np.full(r.count,10,np.uint8);f=np.zeros(r.count,np.uint8)
+            rng=seed_streams(17,h.shape)
+            # Same physical tally estimate at four different sampling budgets.
+            counts=np.full(r.count,samples//4,np.uint32)
+            with patch("neutron.sample",return_value=(counts,{})):
+                h,f,rng=r.transition(h,f,rng)
+                np.testing.assert_array_equal(h,10)
+                np.testing.assert_array_equal(f>>2,32) # half a heat unit, not lost
+                h,f,rng=r.transition(h,f,rng)
+                np.testing.assert_array_equal(h,11)
+                np.testing.assert_array_equal(f>>2,0)
+            output.append((h,f))
+        for h,f in output[1:]:
+            np.testing.assert_array_equal(h,output[0][0])
+            np.testing.assert_array_equal(f,output[0][1])
+
+    def test_forecast_snapshots_retain_fractional_heat(self):
+        r=rules({"forecast":{"horizon_seconds":1.0},"neutron":{"walkers_per_rod":8},
+                 "thermal":{"diffusion_passes":0,"background_reheating_256":0,
+                            "cooling_loaded_256":0,"cooling_quiet_256":0,"runaway_heating_256":0}})
+        h=np.full(r.count,10,np.uint8);h[0]=r.cfg.thermal.critical_heat-1
+        f=np.zeros(r.count,np.uint8)
+        counts=np.ones(r.count,np.uint32)
+        with patch("neutron.sample",return_value=(counts,{})):
+            cold=r.forecast(h,f)
+            f[0]=63<<2
+            warm=r.forecast(h,f)
+        self.assertEqual(cold.rod_probability[0],0.)
+        self.assertEqual(warm.rod_probability[0],1.)
+
+    def test_spraying_preserves_fractional_energy_on_untouched_rods(self):
+        from model import Repair
+        r=rules({"cooling":{"pulse_seconds":.1,"axial_radius_cells":0,"linked_heat_per_pulse":0}})
+        w=Reactor(r)
+        w.heat[:]=12
+        w.fault[:]=23<<2
+        p=Repair(w,0,travel=0)
+        untouched=w.fault[r.segments:].copy()
+        contacts=np.zeros(r.count,np.uint32);contacts[0]=1
+        for _ in range(p.pulse_frames): p.cool(contacts)
+        np.testing.assert_array_equal(w.fault[r.segments:],untouched)
+        self.assertEqual(int(w.fault[0]>>2),23)
+        self.assertLess(w.heat[0],12)
 
 
 class GasTests(unittest.TestCase):

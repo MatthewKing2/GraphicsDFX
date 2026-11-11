@@ -20,7 +20,7 @@ _INTEGER_FIELDS = {
     "connections": "neighbors_per_cell seed",
     "cooling": "group_size group_seed direct_heat_per_pulse linked_heat_per_pulse axial_radius_cells",
     "forecast": "trials seed trial_batch_size",
-    "neutron": "walkers_per_rod max_steps generations rod_pitch fuel_width fuel_absorb_256 moderator_absorb_256 fission_base_256 fission_load_256 hot_feedback_256 hot_source_256 heat_per_fission seed",
+    "neutron": "walkers_per_rod max_steps generations rod_pitch fuel_width fuel_absorb_256 moderator_absorb_256 fission_base_256 fission_load_256 hot_feedback_256 hot_source_256 heat_per_fission source_strength heat_capacity seed",
     "lattice": "film_rows film_columns steps_per_tick gravity_256 splash_radius max_drawn_drips seed",
     "foam": "steps_per_second grid_width grid_height gravity_every_steps diagonal_every_steps flow_every_steps debris_every_steps seed",
     "voxel": "width height depth steps_per_second rod_radius rod_columns nozzle_radius jet_radius jet_push_passes drain_every_steps debris_every_steps seed render_bands max_drawn_particles frame_milliseconds jet_particles_per_step jet_max_particles jet_splash_radius runoff_gravity_passes max_drawn_jet_particles max_simulation_steps_per_frame",
@@ -182,7 +182,7 @@ class Config:
         bounded(count, 1, 8192, "total cells")
         for key, lo, hi in (("walkers_per_rod",1,64),("max_steps",1,256),("generations",1,3),
                             ("rod_pitch",2,16),("fuel_width",1,self.neutron.rod_pitch-1),
-                            ("heat_per_fission",0,16),("seed",0,0xffffffff)):
+                            ("heat_per_fission",0,16),("source_strength",1,256),("heat_capacity",1,256),("seed",0,0xffffffff)):
             bounded(getattr(self.neutron,key),lo,hi,"neutron."+key)
         bounded(self.neutron.source_width_fraction,.01,1,"neutron.source_width_fraction")
         for key, lo, hi in (("film_rows",8,256),("film_columns",8,256),("steps_per_tick",1,8),
